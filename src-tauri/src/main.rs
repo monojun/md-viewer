@@ -270,7 +270,9 @@ fn open_document(app: &AppHandle, path: PathBuf, anchor: Option<String>) {
         .title(file_title(&path))
         .inner_size(width, height)
         .min_inner_size(420.0, 300.0)
-        .on_navigation(is_app_url);
+        .on_navigation(is_app_url)
+        // 자체 점검(CI)에서는 화면 캡처에 다른 창이 끼지 않게 맨 앞에 띄운다
+        .always_on_top(st.self_test.is_some());
     // 새 창은 마지막 창에서 오른쪽 아래로 비켜 연다
     let last = st
         .order
