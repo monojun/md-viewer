@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>MD Viewer</title>
+<link rel="stylesheet" href="fonts/pretendard.css">
+<link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<aside id="sidebar">
+  <div class="sidebar-head">개요</div>
+  <nav id="outline"></nav>
+</aside>
+<main id="content">
+  <article id="write"></article>
+</main>
+<div id="findbar" hidden>
+  <input id="find-input" type="search" placeholder="찾기" autocomplete="off" spellcheck="false">
+  <span id="find-count"></span>
+  <button id="find-prev" title="이전 (⇧⏎)">‹</button>
+  <button id="find-next" title="다음 (⏎)">›</button>
+  <button id="find-close" title="닫기 (esc)">✕</button>
+</div>
+<script src="viewer.bundle.js"></script>
+</body>
+</html>

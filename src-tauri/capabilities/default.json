@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "문서 창마다 기본 권한만. 파일 읽기·링크 열기는 앱 명령(main.rs)이 맡는다.",
+  "windows": ["*"],
+  "permissions": ["core:default"]
+}

@@ -1,0 +1,9 @@
+/* Pretendard (SIL OFL 1.1) — npm pretendard 패키지에서 빌드 때 복사한다.
+   한글·영문·숫자를 한 글꼴로 맞춰 운영체제마다 글자 모양이 달라지지 않게 한다. 가변 글꼴 하나(굵기 45–920). */
+@font-face {
+  font-family: "Pretendard";
+  font-style: normal;
+  font-weight: 45 920;
+  font-display: swap;
+  src: url("PretendardVariable.woff2") format("woff2-variations"), url("PretendardVariable.woff2") format("woff2");
+}

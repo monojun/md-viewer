@@ -1,0 +1,281 @@
+/* MD Viewer 기본 테마 — 읽기 편한 문서 모양.
+   본문은 Pretendard 하나로 한글·영문·숫자를 맞추고(세 운영체제에서 같은 모양), 색은 차분한 코발트 파랑 하나를 강조색으로 쓴다. */
+
+:root {
+  --text: #24272c;
+  --heading: #1b1e23;
+  --muted: #6a7079;
+  --accent: #2a64d0;
+  --accent-strong: #1d4fae;
+  --accent-soft: rgba(42, 100, 208, 0.08);
+  --accent-line: rgba(42, 100, 208, 0.35);
+  --rule: #e6e8ec;
+  --border: #dde1e6;
+  --quote-bar: #c8d3e6;
+  --code-bg: #f1f3f5;
+  --fence-bg: #f7f8fa;
+  --fence-border: #e4e7eb;
+  --stripe: #fafbfc;
+  --th-bg: #f3f5f8;
+  --select: #cfe0fb;
+  --sans: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", "Noto Sans KR",
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
+  --monospace: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", "DejaVu Sans Mono", "Pretendard", monospace;
+  color-scheme: light;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  font-size: 16px;
+  background: #fff;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--text);
+  line-height: 1.7;
+  tab-size: 4;
+  font-feature-settings: "ss06"; /* Pretendard: 숫자·영문 가독성 조정 */
+}
+
+::selection { background: var(--select); }
+
+#write {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 32px 32px 100px;
+  overflow-wrap: break-word;
+}
+@media only screen and (min-width: 1400px) { #write { max-width: 1024px; } }
+@media only screen and (min-width: 1800px) { #write { max-width: 1200px; } }
+
+#write > :first-child { margin-top: 0; }
+#write > ul:first-child, #write > ol:first-child { margin-top: 30px; }
+
+/* 링크 — 밑줄은 옅게, 가리키면 진하게 */
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-line);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+a:hover { color: var(--accent-strong); text-decoration-color: currentColor; }
+
+/* 제목 */
+h1, h2, h3, h4, h5, h6 {
+  position: relative;
+  margin: 1.25em 0 0.6em;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--heading);
+  scroll-margin-top: 12px;
+}
+h1 { font-size: 2.1em; line-height: 1.25; padding-bottom: 0.25em; border-bottom: 1px solid var(--rule); }
+h2 { font-size: 1.6em; line-height: 1.3; padding-bottom: 0.2em; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 1.3em; }
+h4 { font-size: 1.12em; }
+h5 { font-size: 1em; }
+h6 { font-size: 0.95em; color: var(--muted); }
+h1 code, h2 code, h3 code, h4 code, h5 code, h6 code { font-size: 0.9em; }
+
+/* 블록 간격 */
+p, blockquote, ul, ol, dl, table { margin: 0.85em 0; }
+
+hr {
+  height: 1px;
+  margin: 2em 0;
+  padding: 0;
+  border: 0;
+  background: var(--border);
+  overflow: hidden;
+}
+
+strong { font-weight: 700; color: var(--heading); }
+
+/* 목록 — 항목마다 <p> 가 있고 그 여백이 항목 간격이 된다 */
+ul, ol { padding-left: 1.75em; }
+li { position: relative; }
+li > p { margin: 0.35rem 0; }
+li > ul, li > ol { margin: 0; }
+li::marker { color: var(--muted); }
+ul:first-child, ol:first-child { margin-top: 0; }
+ul:last-child, ol:last-child { margin-bottom: 0; }
+
+.task-list-item { list-style-type: none; }
+.task-list-item .task-list-item-checkbox {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 7px 0 0 -22px;
+  accent-color: var(--accent);
+  cursor: default;
+}
+
+/* 인용 */
+blockquote {
+  padding: 0.1em 1em;
+  border-left: 3px solid var(--quote-bar);
+  color: var(--muted);
+}
+blockquote blockquote { padding-right: 0; }
+
+/* 표 */
+table {
+  width: 100%;
+  margin: 1.2em 0;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  word-break: initial;
+  break-inside: auto;
+}
+table th, table td {
+  margin: 0;
+  padding: 7px 13px;
+  border: 1px solid var(--border);
+}
+thead { background: var(--th-bg); }
+table th { font-weight: 600; color: var(--heading); }
+tbody tr:nth-child(2n) { background: var(--stripe); }
+
+/* 코드 */
+code, tt, pre.md-fences, .md-meta-block { font-family: var(--monospace); }
+
+code, tt {
+  padding: 0.12em 0.38em;
+  font-size: 0.86em;
+  background: var(--code-bg);
+  border-radius: 4px;
+}
+
+pre.md-fences {
+  margin: 1.1em 0;
+  padding: 12px 16px;
+  font-size: 0.86em;
+  line-height: 1.6;
+  background: var(--fence-bg);
+  border: 1px solid var(--fence-border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  break-inside: avoid;
+}
+pre.md-fences code {
+  padding: 0;
+  font-size: inherit;
+  background: none;
+  border-radius: 0;
+}
+
+pre.md-meta-block {
+  margin: 0 0 1em;
+  padding: 0.9rem 1rem;
+  font-size: 0.82em;
+  line-height: 1.55;
+  color: var(--muted);
+  background: var(--fence-bg);
+  border: 1px dashed var(--fence-border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+
+kbd {
+  margin: 0 0.1em;
+  padding: 0.1em 0.5em;
+  font-family: var(--sans);
+  font-size: 0.8em;
+  color: var(--heading);
+  background: #fff;
+  border: 1px solid #c9ced6;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* 코드 색 — 차분한 밝은 팔레트 (CodeMirror 토큰 이름 기준) */
+.cm-keyword { color: #8737c7; }
+.cm-atom { color: #b4520a; }
+.cm-number { color: #b4520a; }
+.cm-def { color: #1f5fc7; }
+.cm-variable-2 { color: #2b6c99; }
+.cm-variable-3, .cm-type { color: #0f7a72; }
+.cm-comment { color: #8b929b; font-style: italic; }
+.cm-string { color: #23803a; }
+.cm-string-2 { color: #b4520a; }
+.cm-meta, .cm-qualifier { color: var(--muted); }
+.cm-builtin { color: #7a3ec2; }
+.cm-bracket { color: #8a8f98; }
+.cm-tag { color: #1f7a3a; }
+.cm-attribute { color: #a35a00; }
+.cm-header { color: #1f5fc7; font-weight: bold; }
+.cm-quote { color: #23803a; }
+.cm-hr { color: #999; }
+.cm-link { color: #1f5fc7; text-decoration: underline; }
+.cm-negative { color: #c23030; }
+.cm-positive { color: #23803a; }
+.cm-operator { color: #b03a48; }
+.cm-strong { font-weight: bold; }
+.cm-em { font-style: italic; }
+.cm-strikethrough { text-decoration: line-through; }
+.cm-error { color: #e00; }
+
+/* 이미지 — 문단에 그림 하나뿐이면 가운데 */
+img { max-width: 100%; vertical-align: middle; image-orientation: from-image; border-radius: 4px; }
+p > img:only-child { display: block; margin: 0 auto; }
+
+/* [TOC] */
+.md-toc { margin: 20px 0 36px; padding: 14px 18px; font-size: 0.92em; background: var(--fence-bg); border-radius: 6px; }
+.md-toc-item { display: block; padding: 1px 0; color: var(--accent); text-decoration: none; }
+.md-toc-item:hover { text-decoration: underline; }
+.md-toc-h1 { font-weight: 600; }
+.md-toc-h2 { margin-left: 1.5em; }
+.md-toc-h3 { margin-left: 3em; }
+.md-toc-h4 { margin-left: 4.5em; }
+.md-toc-h5 { margin-left: 6em; }
+.md-toc-h6 { margin-left: 7.5em; }
+
+/* 수식·다이어그램 */
+.md-math-block { margin: 1em 0; text-align: center; overflow-x: auto; overflow-y: hidden; }
+.md-math-block mjx-container[display="true"] { margin: 0.5em 0 !important; }
+.md-diagram { margin: 1.2em 0; text-align: center; }
+.md-diagram svg { max-width: 100%; height: auto; }
+.md-error {
+  padding: 8px 12px;
+  font-family: var(--monospace);
+  font-size: 0.85em;
+  text-align: left;
+  color: #b33;
+  background: #fff5f5;
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+
+/* 각주 */
+sup.md-footnote {
+  padding: 1px 5px;
+  font-size: 0.72em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+sup.md-footnote a { color: inherit; text-decoration: none; }
+.footnotes-area { margin-top: 0.8em; }
+.md-def-footnote { margin: 0.8em 0; font-size: 0.875em; color: var(--muted); }
+.md-def-footnote > p { display: inline; margin: 0; }
+.md-def-name { margin-right: 0.4em; color: var(--heading); font-weight: 600; }
+.md-def-mark { padding: 0 0.3em; color: #b8bec7; font-weight: normal; }
+.md-def-mark:first-child { padding-left: 0; }
+.reversefootnote { font-size: 0.85em; text-decoration: none; }
+
+@media print {
+  html { font-size: 13px; }
+  pre.md-fences { page-break-inside: avoid; }
+  h1, h2, h3, h4, h5, h6 { break-after: avoid-page; }
+}

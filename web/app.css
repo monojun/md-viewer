@@ -1,0 +1,114 @@
+/* 뷰어 껍데기: 개요 사이드바, 찾기 막대 */
+
+:root {
+  --side-bg: #f8f9fb;
+  --side-w: 260px;
+  --ui-font: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+}
+
+#sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 10;
+  width: var(--side-w);
+  flex-direction: column;
+  font-family: var(--ui-font);
+  font-size: 13px;
+  line-height: 1.4;
+  color: #333;
+  background: var(--side-bg);
+  border-right: 1px solid #ececec;
+  display: none;
+}
+body.outline-open #sidebar { display: flex; }
+body.outline-open #content { margin-left: var(--side-w); }
+
+.sidebar-head {
+  flex: none;
+  padding: 14px 16px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #999;
+}
+
+#outline {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px 24px;
+}
+
+.outline-item {
+  display: block;
+  margin: 1px 0;
+  padding-top: 5px;
+  padding-right: 10px;
+  padding-bottom: 5px;
+  overflow: hidden;
+  color: #444;
+  text-decoration: none;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border-radius: 5px;
+  cursor: default;
+}
+.outline-item:hover { background: #eef0f3; }
+.outline-item.active { color: #1d4fae; font-weight: 600; background: rgba(42, 100, 208, 0.1); }
+
+.outline-empty { padding: 6px 14px; color: #aaa; }
+
+/* 찾기 */
+#findbar {
+  position: fixed;
+  top: 10px;
+  right: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px 5px 10px;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+#findbar[hidden] { display: none; }
+
+#find-input {
+  width: 200px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid #d6d6d6;
+  border-radius: 5px;
+  outline: none;
+}
+#find-input:focus { border-color: #8ab4f0; box-shadow: 0 0 0 2px rgba(65, 131, 196, 0.18); }
+#findbar.no-match #find-input { background: #fff3f3; }
+
+#find-count { min-width: 44px; color: #888; text-align: center; font-variant-numeric: tabular-nums; }
+
+#findbar button {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  font: inherit;
+  font-size: 14px;
+  color: #666;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+}
+#findbar button:hover { background: #eee; color: #222; }
+
+::highlight(mdv-find) { background-color: #fff2a8; }
+::highlight(mdv-find-current) { background-color: #ffb547; }
+
+@media print {
+  #sidebar, #findbar { display: none !important; }
+  body.outline-open #content { margin-left: 0; }
+}
