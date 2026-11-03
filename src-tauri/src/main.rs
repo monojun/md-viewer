@@ -18,14 +18,19 @@ use tauri::menu::{
     SubmenuBuilder,
 };
 use tauri::{
-    AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    Window, WindowEvent, Wry,
+    AppHandle, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
+    WindowEvent, Wry,
 };
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MD_EXTS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdtext", "txt"];
 const RECENT_MAX: usize = 10;
+
+// 맥은 Finder 에서 더블클릭한 파일을 앱 준비(setup)보다 먼저 Opened 이벤트로 보낸다.
+// 그때는 AppState 가 아직 없으므로 여기 모아 두었다가 setup 끝에서 연다.
+#[cfg(target_os = "macos")]
+static PENDING_OPEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default, rename_all = "camelCase")]
@@ -864,8 +869,12 @@ fn main() {
                     let _ = fs::write(&report, r#"{"timeout": true}"#);
                     h.exit(2);
                 });
-            } else if !cli.files.is_empty() {
-                for f in std::mem::take(&mut cli.files) {
+            } else if !cli.files.is_empty() || has_pending_open() {
+                #[allow(unused_mut)]
+                let mut files = std::mem::take(&mut cli.files);
+                #[cfg(target_os = "macos")]
+                files.append(&mut PENDING_OPEN.lock().unwrap());
+                for f in files {
                     open_document(&handle, f, None);
                 }
             } else {
@@ -888,25 +897,42 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("MD Viewer 를 시작하지 못했습니다");
 
-    app.run(|app, event| match event {
-        #[cfg(target_os = "macos")]
+    app.run(on_run_event);
+}
+
+fn has_pending_open() -> bool {
+    #[cfg(target_os = "macos")]
+    return !PENDING_OPEN.lock().unwrap().is_empty();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+// 맥 전용 앱 이벤트: Finder·Dock 에서 연 파일, Dock 아이콘 클릭, 마지막 창을 닫아도 앱 유지(일반 맥 앱처럼).
+#[cfg(target_os = "macos")]
+fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
+    use tauri::RunEvent;
+    match event {
         RunEvent::Opened { urls } => {
-            for u in urls {
-                if let Ok(p) = u.to_file_path() {
+            let paths = urls.into_iter().filter_map(|u| u.to_file_path().ok());
+            if app.try_state::<AppState>().is_some() {
+                for p in paths {
                     open_document(app, p, None);
                 }
+            } else {
+                PENDING_OPEN.lock().unwrap().extend(paths);
             }
         }
-        #[cfg(target_os = "macos")]
         RunEvent::Reopen {
             has_visible_windows: false,
             ..
         } => show_open_dialog(app),
-        // 맥은 마지막 창을 닫아도 앱이 남는다 (일반 맥 앱처럼)
-        #[cfg(target_os = "macos")]
         RunEvent::ExitRequested {
             code: None, api, ..
         } if app.state::<AppState>().self_test.is_none() => api.prevent_exit(),
         _ => {}
-    });
+    }
 }
+
+// 윈도우·리눅스는 파일을 명령줄 인자로 받고, 마지막 창을 닫으면 끝난다 (기본 동작).
+#[cfg(not(target_os = "macos"))]
+fn on_run_event(_app: &AppHandle, _event: tauri::RunEvent) {}
