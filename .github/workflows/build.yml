@@ -20,7 +20,9 @@ jobs:
       - name: Release 만들기 (세 빌드가 여기에 파일을 올린다)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "MD Viewer $GITHUB_REF_NAME" --notes "설치 방법: https://github.com/$GITHUB_REPOSITORY/blob/main/INSTALL.md · 바뀐 점: https://github.com/$GITHUB_REPOSITORY/blob/main/CHANGELOG.md" || true
+        run: |
+          NOTES="설치 방법: https://github.com/$GITHUB_REPOSITORY/blob/main/INSTALL.md · 바뀐 점: https://github.com/$GITHUB_REPOSITORY/blob/main/CHANGELOG.md"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "MD Viewer $GITHUB_REF_NAME" --notes "$NOTES" || true
 
   build:
     needs: release
