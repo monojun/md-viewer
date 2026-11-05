@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Tauri 가 만든 Info.plist 에 합쳐진다. 다른 마크다운 앱이 없는 맥에서도 .md 가 markdown 종류로 잡히게 UTI 를 들여온다. -->
+<!-- Tauri 가 만든 Info.plist 에 합쳐진다. 다른 마크다운 앱이 없는 맥에서도 .md 가 markdown 종류로 잡히게 UTI 를 들여온다.
+     CFBundleLocalizations: 메뉴 글이 한국어이므로, macOS 가 넣는 항목(윈도우 메뉴의 채우기·이동 및 크기 조절, 열기 창 단추 등)도
+     한국어 맥에서는 한국어로 나오게 한다. 다른 언어의 맥에서는 영어로 나온다. -->
 <plist version="1.0">
 <dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>ko</string>
+		<string>en</string>
+	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
