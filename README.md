@@ -12,6 +12,7 @@
 ## 특징
 
 - **보기 전용** — 문서를 실수로 고칠 일이 없다. 저장하면 자동으로 다시 그린다.
+- **나란히 보기** — 한 창에 문서 2~3개를 반씩·삼분의 일씩 나란히 띄워 비교한다. '나란히 스크롤'을 켜면 같은 제목끼리 맞춰 함께 내려간다.
 - **같은 모양, 세 운영체제** — 본문 글꼴(Pretendard)을 앱에 넣어 한글·영문이 어디서나 같은 모양이다.
   ![macOS·Windows·Ubuntu 에서 같은 샘플](docs/platforms.png)
 - **문서에 필요한 것들** — 표, 할 일 목록, 각주, front matter, `[TOC]` 목차, 이모지, 코드 문법 색칠,
@@ -32,17 +33,32 @@
 ## 쓰는 법
 
 - .md 파일을 더블클릭(기본 앱으로 지정한 경우)하거나, 우클릭 → 다음으로 열기(연결 프로그램) → MD Viewer
-- 창에 파일을 끌어다 놓아도 열린다. 문서 안의 다른 .md 링크는 새 창으로, 웹 링크는 브라우저로 열린다.
+- 문서 안의 다른 .md 링크는 새 창으로(⌥/Alt+클릭하면 옆 칸으로), 웹 링크는 브라우저로 열린다.
+- macOS 15 이상에서는 다른 앱처럼 `fn`+`control`+화살표로 창을 화면 왼쪽·오른쪽 절반 등에 배치할 수 있다.
 
-| 키 (Windows·Linux 는 ⌘ 대신 Ctrl) | 동작 |
+| 키 (Windows·Linux 는 ⌘ → Ctrl, ⌥ → Alt) | 동작 |
 |---|---|
 | `⌘O` | 열기 (파일 › 최근 사용 도 있음) |
+| `⌥⌘O` | 옆에 열기 (지금 창에 칸 추가, 최대 3개) |
+| `⌘W` | 닫기 (칸이 여럿이면 지금 칸만) |
 | `⇧⌘L` | 개요 사이드바 (현재 위치 표시, 누르면 이동) |
 | `⌘F` / `⌘G` / `⇧⌘G` | 찾기 / 다음 / 이전 (Windows 는 `F3`·`⇧F3` 도 됨, `esc` 닫기) |
 | `⌘=` `⌘-` `⌘0` | 확대 / 축소 / 실제 크기 (기억됨) |
 | `⌘R` | 다시 읽기 (보통은 저장하면 자동 반영) |
 | `⌘P` | 프린트 — 프린트 창에서 PDF 로 저장 |
 | `⇧⌘R` | 파일이 있는 폴더 보기 |
+
+### 나란히 보기 (한 창에 2~3개)
+
+![두 문서를 나란히 연 화면](docs/side-by-side.png)
+
+- **끌어다 놓기** — 열린 창에 .md 파일을 끌어 오면 놓일 자리가 미리 보인다. 마우스 위치에 따라 왼쪽·사이·오른쪽에 칸이 생기고, 세 칸이 차 있으면 마우스 아래 칸을 바꾼다.
+- **옆에 열기** — 파일 › 옆에 열기… (`⌥⌘O`)
+- **한꺼번에 열기** — Finder·열기 창에서 2~3개를 함께 골라 열면 한 창에 나란히 열린다.
+- **창 합치기** — 따로 열린 창들을 윈도우(창) › 창 합치기 로 한 창에 모은다. 반대로 칸 머리의 ↗ 단추나 이 칸을 새 창으로 로 떼어 낸다.
+- 칸을 하나 더하거나 닫으면 칸 너비는 그대로 두고 창이 그만큼 넓어지거나 좁아진다 (화면보다 넓어지지는 않는다).
+- 찾기·개요·폴더에서 보기·프린트·`⌘W` 는 마지막으로 누른 칸(머리에 파란 줄)에 적용된다.
+- 보기 › 나란히 스크롤 — 한 칸을 스크롤하면 다른 칸도 같은 제목 구간의 같은 위치로 따라온다. 고친 판과 옛 판처럼 내용 길이가 달라도 같은 절끼리 맞는다.
 
 ### 마크다운 규칙
 
@@ -89,9 +105,12 @@ scripts/dev-mac.sh --install     # 빌드 후 /Applications 에 설치
 ```bash
 md-viewer --self-test samples/sample.md --report r.json   # 샘플을 그린 결과(제목·코드·수식·그림 수 등)를 JSON 으로 남기고 끝난다
 node scripts/check-selftest.mjs r.json                    # 기준과 비교
+md-viewer --self-test samples/sample.md --report r3.json samples/sample.md samples/sample.md   # 세 칸 나란히
+node scripts/check-selftest.mjs r3.json "" 3
+md-viewer --self-test samples/sample.md --report rs.json --scenario other.md   # 칸 닫기 → 끌어다 놓기 → 새 창으로 떼기
 ```
 
-CI(GitHub Actions)는 세 운영체제에서 빌드한 뒤 앱을 실제로 띄워 이 점검을 하고, 화면 캡처를 함께 남긴다.
+CI(GitHub Actions)는 세 운영체제에서 빌드한 뒤 앱을 실제로 띄워 이 세 가지 점검을 하고, 화면 캡처를 함께 남긴다 (`scripts/ci-selftest.*`).
 
 앱 로그: macOS `~/Library/Logs/io.github.monojun.mdviewer/` · Windows `%LOCALAPPDATA%\io.github.monojun.mdviewer\logs\` · Linux `~/.local/share/io.github.monojun.mdviewer/logs/`
 

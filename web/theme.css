@@ -44,17 +44,17 @@ body {
 
 ::selection { background: var(--select); }
 
-#write {
+.write {
   max-width: 860px;
   margin: 0 auto;
   padding: 32px 32px 100px;
   overflow-wrap: break-word;
 }
-@media only screen and (min-width: 1400px) { #write { max-width: 1024px; } }
-@media only screen and (min-width: 1800px) { #write { max-width: 1200px; } }
+@media only screen and (min-width: 1400px) { .write { max-width: 1024px; } }
+@media only screen and (min-width: 1800px) { .write { max-width: 1200px; } }
 
-#write > :first-child { margin-top: 0; }
-#write > ul:first-child, #write > ol:first-child { margin-top: 30px; }
+.write > :first-child { margin-top: 0; }
+.write > ul:first-child, .write > ol:first-child { margin-top: 30px; }
 
 /* 링크 — 밑줄은 옅게, 가리키면 진하게 */
 a {
