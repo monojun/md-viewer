@@ -1,11 +1,94 @@
-/* 뷰어 껍데기: 개요 사이드바, 찾기 막대 */
+/* 뷰어 껍데기: 칸 배치, 칸 머리, 개요 사이드바, 찾기 막대, 끌어다 놓기 미리 보기 */
 
 :root {
   --side-bg: #f8f9fb;
   --side-w: 260px;
+  --head-h: 34px;
   --ui-font: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
 }
 
+/* 칸 배치 — 창 너비를 칸들이 똑같이 나눠 갖고, 칸마다 따로 스크롤된다 */
+html, body { height: 100%; }
+body { overflow: hidden; }
+
+#content {
+  position: fixed;
+  inset: 0;
+  display: flex;
+}
+body.outline-open #content { left: var(--side-w); }
+
+.pane {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+}
+.pane + .pane { border-left: 1px solid #e3e6ea; }
+
+.pane-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+
+/* 칸 머리 — 칸이 둘 이상일 때만. 문서 이름 · 폴더 · 새 창으로 · 닫기 */
+.pane-head {
+  display: none;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: var(--head-h);
+  padding: 0 6px 0 14px;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  line-height: 1;
+  color: #8a9099;
+  background: var(--side-bg);
+  border-bottom: 1px solid #ebedf0;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+body.multi .pane-head { display: flex; }
+.pane.active .pane-head { box-shadow: inset 0 2px 0 var(--accent, #2a64d0); }
+
+.pane-name {
+  flex: none;
+  max-width: 70%;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #4a5059;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pane.active .pane-name { color: var(--heading, #1b1e23); }
+.pane-dir {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pane-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #9aa0a8;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+}
+.pane-btn:hover { color: #2b3036; background: #e9ecf0; }
+
+/* 개요 */
 #sidebar {
   position: fixed;
   top: 0;
@@ -23,7 +106,6 @@
   display: none;
 }
 body.outline-open #sidebar { display: flex; }
-body.outline-open #content { margin-left: var(--side-w); }
 
 .sidebar-head {
   flex: none;
@@ -76,6 +158,7 @@ body.outline-open #content { margin-left: var(--side-w); }
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
 }
+body.multi #findbar { top: calc(var(--head-h) + 8px); }
 #findbar[hidden] { display: none; }
 
 #find-input {
@@ -108,7 +191,53 @@ body.outline-open #content { margin-left: var(--side-w); }
 ::highlight(mdv-find) { background-color: #fff2a8; }
 ::highlight(mdv-find-current) { background-color: #ffb547; }
 
+/* 끌어다 놓기 — 놓으면 칸이 어떻게 놓일지 미리 보여 준다 */
+#dropzone {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  font-family: var(--ui-font);
+  background: rgba(246, 247, 249, 0.88);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+#dropzone[hidden] { display: none; }
+body.outline-open #dropzone { left: var(--side-w); }
+
+.drop-cell {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 16px;
+  font-size: 13px;
+  color: #8a9099;
+  text-align: center;
+  border: 1.5px dashed #cdd3dc;
+  border-radius: 10px;
+}
+.drop-cell span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drop-cell em { font-size: 12px; font-style: normal; }
+.drop-cell.target {
+  color: var(--accent-strong, #1d4fae);
+  background: rgba(42, 100, 208, 0.07);
+  border: 1.5px solid var(--accent, #2a64d0);
+}
+.drop-cell.target span { font-size: 14px; font-weight: 600; }
+
+/* 프린트 — 지금 칸 하나만, 스크롤 없이 전부 */
 @media print {
-  #sidebar, #findbar { display: none !important; }
-  body.outline-open #content { margin-left: 0; }
+  html, body { height: auto; overflow: visible; }
+  #sidebar, #findbar, #dropzone, .pane-head { display: none !important; }
+  #content { position: static; display: block; }
+  .pane:not(.active) { display: none; }
+  .pane + .pane { border: 0; }
+  .pane-scroll { overflow: visible; }
 }

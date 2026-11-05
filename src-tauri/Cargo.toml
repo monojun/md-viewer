@@ -27,3 +27,8 @@ strip = true
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = "2"
+
+# 자체 점검에서 맥 '윈도우' 메뉴가 제대로 등록됐는지 읽어 보는 데만 쓴다 (Tauri 가 이미 쓰는 판과 같게)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }

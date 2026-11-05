@@ -1,5 +1,5 @@
-// MD Viewer 앱 껍데기 (Tauri — 맥·윈도우·리눅스). 문서 하나에 창 하나.
-// 화면은 dist/viewer.html (web/ 를 묶은 것)이고, 이 파일은 파일 읽기·감시, 창·메뉴, 링크 열기를 맡는다.
+// MD Viewer 앱 껍데기 (Tauri — 맥·윈도우·리눅스). 창 하나에 문서 칸(pane)을 1~3개 나란히 둔다.
+// 화면은 dist/viewer.html (web/ 를 묶은 것)이고, 이 파일은 파일 읽기·감시, 창·칸·메뉴, 링크 열기를 맡는다.
 // 화면 쪽과는 두 길로 주고받는다: 화면 → 여기 = invoke 명령(load_document 등), 여기 → 화면 = eval("MDV.…").
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -7,25 +7,26 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{
-    Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu,
-    SubmenuBuilder,
+    CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder,
+    PredefinedMenuItem, Submenu, SubmenuBuilder,
 };
 use tauri::{
-    AppHandle, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
-    WindowEvent, Wry,
+    AppHandle, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, Window, WindowEvent, Wry,
 };
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MD_EXTS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdtext", "txt"];
 const RECENT_MAX: usize = 10;
+const MAX_PANES: usize = 3;
 
 // 맥은 Finder 에서 더블클릭한 파일을 앱 준비(setup)보다 먼저 Opened 이벤트로 보낸다.
 // 그때는 AppState 가 아직 없으므로 여기 모아 두었다가 setup 끝에서 연다.
@@ -36,8 +37,9 @@ static PENDING_OPEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 #[serde(default, rename_all = "camelCase")]
 struct Prefs {
     outline_open: bool,
+    sync_scroll: bool,
     zoom: f64,
-    width: f64,
+    width: f64, // 칸 하나의 너비. 칸이 여럿이면 창은 그 배수로 연다
     height: f64,
     recent: Vec<PathBuf>,
 }
@@ -46,6 +48,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             outline_open: false,
+            sync_scroll: false,
             zoom: 1.0,
             width: 900.0,
             height: 1000.0,
@@ -54,34 +57,46 @@ impl Default for Prefs {
     }
 }
 
-struct Doc {
+struct Pane {
+    id: u32, // 앱 전체에서 하나뿐인 번호. 화면 쪽도 이 번호로 칸을 가리킨다
     path: PathBuf,
     anchor: Option<String>,
     last_text: Option<String>, // 감시가 같은 내용으로 여러 번 울려도 다시 그리지 않게
     #[allow(dead_code)]
-    watcher: Option<notify::RecommendedWatcher>, // 창이 닫혀 Doc 이 지워지면 감시도 끝난다
+    watcher: Option<notify::RecommendedWatcher>, // 칸이 닫혀 Pane 이 지워지면 감시도 끝난다
+}
+
+struct Win {
+    panes: Vec<Pane>, // 왼쪽부터
+    active: u32,      // 메뉴(닫기·폴더에서 보기 등)가 가리키는 칸
 }
 
 struct SelfTest {
     file: PathBuf,
     report: PathBuf,
     hold: u64,
+    scenario: bool, // 칸 닫기·끌어다 놓기·새 창으로 떼기를 차례로 해 본다
     reported: AtomicBool,
 }
 
+// 잠금 규칙: wins 를 잠근 채로 창 크기·위치를 묻거나 바꾸지 않는다.
+// (명령은 다른 스레드에서 돌고, 창 조작은 메인 스레드를 기다리는데 메인 스레드의 창 이벤트도 wins 를 잠근다)
 struct AppState {
-    docs: Mutex<HashMap<String, Doc>>, // 창 label → 문서
+    wins: Mutex<HashMap<String, Win>>, // 창 label → 칸들
     order: Mutex<Vec<String>>,         // 열린 순서 (새 창 계단 배치·메뉴 대상 찾기)
     counter: AtomicUsize,
+    pane_counter: AtomicU32,
     prefs: Mutex<Prefs>,
     prefs_path: PathBuf,
     log_path: PathBuf,
     recent_menu: Mutex<Option<Submenu<Wry>>>,
+    sync_item: Mutex<Option<CheckMenuItem<Wry>>>,
     self_test: Option<SelfTest>,
 }
 
 // ── 명령줄 ──────────────────────────────────────────────────────────
-// 파일 경로(윈도우·리눅스 파일 연결), --self-test <md> --report <json> [--hold 초], --set-default
+// 파일 경로(윈도우·리눅스 파일 연결), --set-default,
+// --self-test <md> --report <json> [--hold 초] [--scenario] [나란히 둘 md…]
 struct Cli {
     files: Vec<PathBuf>,
     self_test: Option<SelfTest>,
@@ -94,13 +109,14 @@ fn parse_cli(args: impl IntoIterator<Item = String>, cwd: &Path) -> Cli {
         self_test: None,
         set_default: false,
     };
-    let (mut test_file, mut report, mut hold) = (None, None, 0);
+    let (mut test_file, mut report, mut hold, mut scenario) = (None, None, 0, false);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--self-test" => test_file = it.next().map(|f| cwd.join(f)),
             "--report" => report = it.next().map(|f| cwd.join(f)),
             "--hold" => hold = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+            "--scenario" => scenario = true,
             "--set-default" => cli.set_default = true,
             s if s.starts_with('-') => {}
             s => {
@@ -120,6 +136,7 @@ fn parse_cli(args: impl IntoIterator<Item = String>, cwd: &Path) -> Cli {
             file,
             report,
             hold,
+            scenario,
             reported: AtomicBool::new(false),
         });
     }
@@ -162,14 +179,27 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+fn canonical(p: PathBuf) -> PathBuf {
+    fs::canonicalize(&p).unwrap_or(p)
+}
+
 fn file_title(p: &Path) -> String {
     p.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "MD Viewer".into())
 }
 
+fn json<T: Serialize + ?Sized>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "null".into())
+}
+
 // 편집기들은 임시 파일에 쓰고 이름을 바꿔 저장하므로 파일 대신 폴더를 보고 이름으로 거른다.
-fn watch_file(app: &AppHandle, label: &str, path: &Path) -> Option<notify::RecommendedWatcher> {
+fn watch_file(
+    app: &AppHandle,
+    label: &str,
+    pane: u32,
+    path: &Path,
+) -> Option<notify::RecommendedWatcher> {
     let (app, label, name) = (app.clone(), label.to_string(), path.file_name()?.to_owned());
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(ev) = res else { return };
@@ -183,7 +213,7 @@ fn watch_file(app: &AppHandle, label: &str, path: &Path) -> Option<notify::Recom
             .any(|p| p.file_name() == Some(name.as_os_str()))
         {
             if let Some(w) = app.get_webview_window(&label) {
-                let _ = w.eval("MDV.changed()");
+                let _ = w.eval(format!("MDV.changed({pane})"));
             }
         }
     })
@@ -192,6 +222,21 @@ fn watch_file(app: &AppHandle, label: &str, path: &Path) -> Option<notify::Recom
         .watch(path.parent()?, RecursiveMode::NonRecursive)
         .ok()?;
     Some(watcher)
+}
+
+fn new_pane(app: &AppHandle, label: &str, path: PathBuf, anchor: Option<String>) -> Pane {
+    let id = app
+        .state::<AppState>()
+        .pane_counter
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    Pane {
+        id,
+        watcher: watch_file(app, label, id, &path),
+        path,
+        anchor,
+        last_text: None,
+    }
 }
 
 fn log_line(app: &AppHandle, msg: &str) {
@@ -233,41 +278,149 @@ fn is_app_url(url: &Url) -> bool {
         )
 }
 
-fn scroll_to(w: &WebviewWindow, anchor: &str) {
-    let _ = w.eval(format!(
-        "MDV.scrollToAnchor({})",
-        serde_json::to_string(anchor).unwrap_or_default()
-    ));
+fn titles_of(win: &Win) -> String {
+    win.panes
+        .iter()
+        .map(|p| file_title(&p.path))
+        .collect::<Vec<_>>()
+        .join("  ·  ")
 }
 
-fn open_document(app: &AppHandle, path: PathBuf, anchor: Option<String>) {
-    let path = fs::canonicalize(&path).unwrap_or(path);
-    let st = app.state::<AppState>();
+fn update_title(app: &AppHandle, label: &str) {
+    let title = {
+        let st = app.state::<AppState>();
+        let wins = st.wins.lock().unwrap();
+        wins.get(label).map(titles_of)
+    };
+    if let (Some(t), Some(w)) = (title, app.get_webview_window(label)) {
+        let _ = w.set_title(&t);
+    }
+}
 
-    // 이미 열린 문서면 그 창을 앞으로
-    let existing = st
-        .docs
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|(_, d)| d.path == path)
-        .map(|(l, _)| l.clone());
-    if let Some(w) = existing.and_then(|l| app.get_webview_window(&l)) {
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-        if let Some(a) = anchor {
-            scroll_to(&w, &a);
+// 창 너비를 바꾸되 화면(작업 영역) 밖으로 나가지 않게 줄이거나 왼쪽으로 옮긴다.
+fn set_width_on_screen(w: &WebviewWindow, width: f64) {
+    let Ok(sf) = w.scale_factor() else { return };
+    let (Ok(inner), Ok(outer), Ok(pos)) = (w.inner_size(), w.outer_size(), w.outer_position())
+    else {
+        return;
+    };
+    let (inner, outer, pos) = (
+        inner.to_logical::<f64>(sf),
+        outer.to_logical::<f64>(sf),
+        pos.to_logical::<f64>(sf),
+    );
+    let frame = (outer.width - inner.width).max(0.0);
+    let mut width = width.max(420.0);
+    if let Ok(Some(m)) = w.current_monitor() {
+        let area = m.work_area();
+        let (ax, aw) = (
+            f64::from(area.position.x) / sf,
+            f64::from(area.size.width) / sf,
+        );
+        width = width.min(aw - frame);
+        if pos.x + width + frame > ax + aw {
+            let x = (ax + aw - width - frame).max(ax);
+            let _ = w.set_position(LogicalPosition::new(x, pos.y));
         }
+    }
+    let _ = w.set_size(LogicalSize::new(width, inner.height));
+}
+
+// 칸 수가 바뀌면 칸 하나의 너비는 그대로 두고 창을 늘이거나 줄인다 (최대화·전체 화면이면 그대로).
+fn resize_for_panes(w: &WebviewWindow, from: usize, to: usize) {
+    if from == 0
+        || from == to
+        || w.is_fullscreen().unwrap_or(false)
+        || w.is_maximized().unwrap_or(false)
+    {
         return;
     }
+    let Ok(sf) = w.scale_factor() else { return };
+    let Ok(inner) = w.inner_size() else { return };
+    let width = inner.to_logical::<f64>(sf).width;
+    set_width_on_screen(w, width / from as f64 * to as f64);
+}
 
+fn find_pane(app: &AppHandle, path: &Path) -> Option<(String, u32)> {
+    let st = app.state::<AppState>();
+    let wins = st.wins.lock().unwrap();
+    wins.iter().find_map(|(label, win)| {
+        win.panes
+            .iter()
+            .find(|p| p.path == path)
+            .map(|p| (label.clone(), p.id))
+    })
+}
+
+fn show_pane(app: &AppHandle, label: &str, pane: u32, anchor: Option<String>) {
+    let Some(w) = app.get_webview_window(label) else {
+        return;
+    };
+    let _ = w.unminimize();
+    let _ = w.set_focus();
+    let mut js = format!("MDV.focusPane({pane});");
+    if let Some(a) = anchor {
+        js += &format!("MDV.goto({pane},{});", json(&a));
+    }
+    let _ = w.eval(js);
+}
+
+/// 문서 하나를 새 창으로. 이미 어느 칸에 열려 있으면 그 칸을 앞으로.
+fn open_document(app: &AppHandle, path: PathBuf, anchor: Option<String>) {
+    let path = canonical(path);
+    if let Some((label, pane)) = find_pane(app, &path) {
+        show_pane(app, &label, pane, anchor);
+        return;
+    }
+    open_window(app, vec![(path, anchor)]);
+}
+
+/// 한꺼번에 연 문서들 (Finder 에서 여럿 골라 열기, 열기 창에서 여럿 고르기).
+/// 2~3개면 한 창에 나란히, 하나이거나 4개 이상이면 각각 새 창. 이미 열린 문서는 그 칸을 앞으로.
+fn open_documents(app: &AppHandle, paths: Vec<PathBuf>) {
+    let mut fresh: Vec<PathBuf> = vec![];
+    for p in paths.into_iter().map(canonical) {
+        if let Some((label, pane)) = find_pane(app, &p) {
+            show_pane(app, &label, pane, None);
+        } else if !fresh.contains(&p) {
+            fresh.push(p);
+        }
+    }
+    if (2..=MAX_PANES).contains(&fresh.len()) {
+        open_window(app, fresh.into_iter().map(|p| (p, None)).collect());
+    } else {
+        for p in fresh {
+            open_window(app, vec![(p, None)]);
+        }
+    }
+}
+
+/// 문서들을 칸으로 나란히 둔 새 창.
+fn open_window(app: &AppHandle, docs: Vec<(PathBuf, Option<String>)>) {
+    if docs.is_empty() {
+        return;
+    }
+    let st = app.state::<AppState>();
     let label = format!("doc{}", st.counter.fetch_add(1, Ordering::SeqCst) + 1);
+    let panes: Vec<Pane> = docs
+        .into_iter()
+        .take(MAX_PANES)
+        .map(|(p, a)| new_pane(app, &label, canonical(p), a))
+        .collect();
+    let count = panes.len();
     let (width, height) = {
         let p = st.prefs.lock().unwrap();
-        (p.width, p.height)
+        (p.width * count as f64, p.height)
     };
+    let win = Win {
+        active: panes[0].id,
+        panes,
+    };
+    let title = titles_of(&win);
+    let paths: Vec<PathBuf> = win.panes.iter().map(|p| p.path.clone()).collect();
+
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("viewer.html".into()))
-        .title(file_title(&path))
+        .title(title)
         .inner_size(width, height)
         .min_inner_size(420.0, 300.0)
         .on_navigation(is_app_url)
@@ -290,29 +443,151 @@ fn open_document(app: &AppHandle, path: PathBuf, anchor: Option<String>) {
         None => builder.center(),
     };
 
-    // 화면이 곧바로 load_document 를 부르므로 창보다 먼저 등록한다
-    st.docs.lock().unwrap().insert(
-        label.clone(),
-        Doc {
-            path: path.clone(),
-            anchor,
-            last_text: None,
-            watcher: None,
-        },
-    );
+    // 화면이 곧바로 get_layout 을 부르므로 창보다 먼저 등록한다
+    st.wins.lock().unwrap().insert(label.clone(), win);
     match builder.build() {
-        Ok(_) => {
+        Ok(w) => {
             st.order.lock().unwrap().push(label.clone());
-            let watcher = watch_file(app, &label, &path);
-            if let Some(d) = st.docs.lock().unwrap().get_mut(&label) {
-                d.watcher = watcher;
+            if count > 1 {
+                set_width_on_screen(&w, width);
             }
-            remember_recent(app, &path);
+            for p in paths {
+                remember_recent(app, &p);
+            }
         }
         Err(e) => {
-            st.docs.lock().unwrap().remove(&label);
-            log_line(app, &format!("창 열기 실패 {}: {e}", path.display()));
+            st.wins.lock().unwrap().remove(&label);
+            log_line(app, &format!("창 열기 실패: {e}"));
         }
+    }
+}
+
+/// 창에 칸을 더한다. at: 끼워 넣을 자리(없으면 오른쪽 끝), replace: 이 칸을 바꿔 끼운다(칸이 꽉 찼을 때 끌어다 놓기).
+/// 이 창에 이미 있는 문서는 그 칸을 앞으로만. 자리가 모자라면 남는 문서는 새 창으로.
+fn add_panes(
+    app: &AppHandle,
+    label: &str,
+    paths: Vec<PathBuf>,
+    at: Option<usize>,
+    replace: Option<u32>,
+) {
+    let Some(w) = app.get_webview_window(label) else {
+        for p in paths {
+            open_document(app, p, None);
+        }
+        return;
+    };
+    let st = app.state::<AppState>();
+    let mut js = String::new();
+    let (mut opened, mut extra) = (vec![], vec![]);
+    let (before, after) = {
+        let mut wins = st.wins.lock().unwrap();
+        let Some(win) = wins.get_mut(label) else {
+            return;
+        };
+        let before = win.panes.len();
+        let mut at = at.unwrap_or(before).min(before);
+        let mut replace = replace.filter(|id| win.panes.iter().any(|p| p.id == *id));
+        for path in paths.into_iter().map(canonical) {
+            if let Some(p) = win.panes.iter().find(|p| p.path == path) {
+                win.active = p.id;
+                continue;
+            }
+            if let Some(old) = replace.take() {
+                let i = win.panes.iter().position(|p| p.id == old).unwrap_or(0);
+                let pane = new_pane(app, label, path.clone(), None);
+                js += &format!("MDV.replacePane({old},{});", pane.id);
+                win.active = pane.id;
+                win.panes[i] = pane; // 옛 칸의 감시도 여기서 끝난다
+                opened.push(path);
+            } else if win.panes.len() < MAX_PANES {
+                let pane = new_pane(app, label, path.clone(), None);
+                js += &format!("MDV.addPane({},{at});", pane.id);
+                win.active = pane.id;
+                win.panes.insert(at, pane);
+                at += 1;
+                opened.push(path);
+            } else {
+                extra.push(path);
+            }
+        }
+        js += &format!("MDV.focusPane({});", win.active);
+        (before, win.panes.len())
+    };
+    let _ = w.eval(js);
+    update_title(app, label);
+    resize_for_panes(&w, before, after);
+    let _ = w.set_focus();
+    for p in opened {
+        remember_recent(app, &p);
+    }
+    for p in extra {
+        open_document(app, p, None);
+    }
+}
+
+/// 칸 하나를 닫는다. 마지막 칸이면 창을 닫는다. 닫힌 칸의 문서 경로를 돌려준다.
+fn remove_pane(app: &AppHandle, label: &str, id: u32) -> Option<PathBuf> {
+    let st = app.state::<AppState>();
+    let (path, before, left, active) = {
+        let mut wins = st.wins.lock().unwrap();
+        let win = wins.get_mut(label)?;
+        let i = win.panes.iter().position(|p| p.id == id)?;
+        let before = win.panes.len();
+        let path = win.panes.remove(i).path;
+        if let Some(next) = win.panes.get(i.min(win.panes.len().saturating_sub(1))) {
+            if win.active == id {
+                win.active = next.id;
+            }
+        }
+        (path, before, win.panes.len(), win.active)
+    };
+    let w = app.get_webview_window(label)?;
+    if left == 0 {
+        let _ = w.close();
+    } else {
+        let _ = w.eval(format!("MDV.removePane({id});MDV.focusPane({active});"));
+        update_title(app, label);
+        resize_for_panes(&w, before, left);
+    }
+    Some(path)
+}
+
+/// 다른 창들의 문서를 이 창으로 모은다 (칸이 다 찰 때까지, 최근 창부터).
+fn merge_windows(app: &AppHandle, target: &str) {
+    let st = app.state::<AppState>();
+    let order = st.order.lock().unwrap().clone();
+    let moving: Vec<(String, u32)> = {
+        let wins = st.wins.lock().unwrap();
+        let room = MAX_PANES.saturating_sub(wins.get(target).map_or(MAX_PANES, |w| w.panes.len()));
+        order
+            .iter()
+            .rev()
+            .filter(|l| l.as_str() != target)
+            .filter_map(|l| wins.get(l).map(|w| (l, w)))
+            .flat_map(|(l, w)| w.panes.iter().map(move |p| (l.clone(), p.id)))
+            .take(room)
+            .collect()
+    };
+    let paths: Vec<PathBuf> = moving
+        .into_iter()
+        .filter_map(|(l, id)| remove_pane(app, &l, id))
+        .collect();
+    add_panes(app, target, paths, None, None);
+}
+
+/// 칸 하나를 떼어 새 창으로.
+fn pop_out(app: &AppHandle, label: &str, id: u32) {
+    let count = {
+        let st = app.state::<AppState>();
+        let wins = st.wins.lock().unwrap();
+        wins.get(label).map_or(0, |w| w.panes.len())
+    };
+    if count < 2 {
+        return;
+    }
+    if let Some(path) = remove_pane(app, label, id) {
+        open_window(app, vec![(path, None)]);
     }
 }
 
@@ -327,11 +602,16 @@ fn focused_window(app: &AppHandle) -> Option<WebviewWindow> {
         })
 }
 
-fn show_open_dialog(app: &AppHandle) {
+/// 열기 창. beside 에 창 label 을 주면 고른 문서를 그 창에 칸으로 더한다.
+fn show_open_dialog(app: &AppHandle, beside: Option<String>) {
     let handle = app.clone();
     app.dialog()
         .file()
-        .set_title("마크다운 열기")
+        .set_title(if beside.is_some() {
+            "옆에 열기"
+        } else {
+            "마크다운 열기"
+        })
         .add_filter("Markdown", MD_EXTS)
         .pick_files(move |picked| {
             let paths: Vec<PathBuf> = picked
@@ -342,13 +622,14 @@ fn show_open_dialog(app: &AppHandle) {
             if paths.is_empty() {
                 // 맥은 창이 없어도 메뉴 막대에 남지만, 윈도우·리눅스는 보이는 것 없이 떠 있게 되므로 끝낸다
                 #[cfg(not(target_os = "macos"))]
-                if handle.state::<AppState>().docs.lock().unwrap().is_empty() {
+                if handle.state::<AppState>().wins.lock().unwrap().is_empty() {
                     handle.exit(0);
                 }
                 return;
             }
-            for p in paths {
-                open_document(&handle, p, None);
+            match beside {
+                Some(label) => add_panes(&handle, &label, paths, None, None),
+                None => open_documents(&handle, paths),
             }
         });
 }
@@ -411,8 +692,13 @@ fn item(app: &AppHandle, id: &str, text: &str, accel: &str) -> tauri::Result<Men
         .build(app)
 }
 
-#[allow(unused_mut)]
-fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, Submenu<Wry>)> {
+struct AppMenu {
+    menu: Menu<Wry>,
+    recent: Submenu<Wry>,
+    sync: CheckMenuItem<Wry>,
+}
+
+fn build_menu(app: &AppHandle, sync_on: bool) -> tauri::Result<AppMenu> {
     let recent = SubmenuBuilder::with_id(app, "recent", "최근 사용").build()?;
     let reveal = if cfg!(target_os = "macos") {
         "Finder에서 보기"
@@ -421,8 +707,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, Submenu<Wry>)> {
     } else {
         "폴더에서 보기"
     };
+    #[allow(unused_mut)]
     let mut file = SubmenuBuilder::new(app, "파일")
         .item(&item(app, "open", "열기…", "CmdOrCtrl+O")?)
+        .item(&item(app, "open-beside", "옆에 열기…", "Alt+CmdOrCtrl+O")?)
         .item(&recent)
         .separator()
         .item(&item(app, "reveal", reveal, "Shift+CmdOrCtrl+R")?)
@@ -448,8 +736,12 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, Submenu<Wry>)> {
     } else {
         "F11"
     };
+    let sync = CheckMenuItemBuilder::with_id("sync-scroll", "나란히 스크롤")
+        .checked(sync_on)
+        .build(app)?;
     let view = SubmenuBuilder::new(app, "보기")
         .item(&item(app, "outline", "개요 사이드바", "Shift+CmdOrCtrl+L")?)
+        .item(&sync)
         .separator()
         .item(&item(app, "zoom-reset", "실제 크기", "CmdOrCtrl+0")?)
         .item(&item(app, "zoom-in", "확대", "CmdOrCtrl+=")?)
@@ -458,6 +750,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, Submenu<Wry>)> {
         .item(&item(app, "reload", "다시 읽기", "CmdOrCtrl+R")?)
         .item(&item(app, "fullscreen", "전체 화면", fullscreen)?)
         .build()?;
+    let merge = MenuItemBuilder::with_id("merge", "창 합치기 (나란히 보기)").build(app)?;
+    let pop = MenuItemBuilder::with_id("pop-out", "이 칸을 새 창으로").build(app)?;
 
     let mut menu = MenuBuilder::new(app);
     #[cfg(target_os = "macos")]
@@ -494,10 +788,25 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, Submenu<Wry>)> {
         let window = SubmenuBuilder::with_id(app, tauri::menu::WINDOW_SUBMENU_ID, "윈도우")
             .item(&PredefinedMenuItem::minimize(app, Some("최소화"))?)
             .item(&PredefinedMenuItem::maximize(app, Some("확대/축소"))?)
+            .separator()
+            .item(&merge)
+            .item(&pop)
             .build()?;
         menu = menu.item(&window);
     }
-    Ok((menu.build()?, recent))
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window = SubmenuBuilder::new(app, "창")
+            .item(&merge)
+            .item(&pop)
+            .build()?;
+        menu = menu.item(&window);
+    }
+    Ok(AppMenu {
+        menu: menu.build()?,
+        recent,
+        sync,
+    })
 }
 
 fn on_menu(app: &AppHandle, event: MenuEvent) {
@@ -508,24 +817,32 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
             let _ = w.eval(code);
         }
     };
-    let doc_path = |w: &WebviewWindow| {
-        app.state::<AppState>()
-            .docs
-            .lock()
-            .unwrap()
-            .get(w.label())
-            .map(|d| d.path.clone())
+    // 이 창의 (칸 수, 지금 칸 번호, 지금 칸 문서)
+    let current = |w: &WebviewWindow| {
+        let st = app.state::<AppState>();
+        let wins = st.wins.lock().unwrap();
+        let win = wins.get(w.label())?;
+        let pane = win.panes.iter().find(|p| p.id == win.active)?;
+        Some((win.panes.len(), pane.id, pane.path.clone()))
     };
     match id.as_str() {
-        "open" => show_open_dialog(app),
+        "open" => show_open_dialog(app, None),
+        "open-beside" => show_open_dialog(app, win.as_ref().map(|w| w.label().to_string())),
         "reveal" => {
-            if let Some(p) = win.as_ref().and_then(doc_path) {
+            if let Some((_, _, p)) = win.as_ref().and_then(current) {
                 let _ = app.opener().reveal_item_in_dir(p);
             }
         }
         "close" => {
             if let Some(w) = &win {
-                let _ = w.close();
+                match current(w) {
+                    Some((n, pane, _)) if n > 1 => {
+                        remove_pane(app, w.label(), pane);
+                    }
+                    _ => {
+                        let _ = w.close();
+                    }
+                }
             }
         }
         "print" => {
@@ -539,6 +856,33 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
         "find-prev" => js("MDV.find.prev()"),
         "outline" => js("MDV.toggleOutline()"),
         "reload" => js("MDV.reload(true)"),
+        "merge" => {
+            if let Some(w) = &win {
+                merge_windows(app, w.label());
+            }
+        }
+        "pop-out" => {
+            if let Some(w) = &win {
+                if let Some((_, pane, _)) = current(w) {
+                    pop_out(app, w.label(), pane);
+                }
+            }
+        }
+        "sync-scroll" => {
+            let st = app.state::<AppState>();
+            let on = {
+                let mut p = st.prefs.lock().unwrap();
+                p.sync_scroll = !p.sync_scroll;
+                p.sync_scroll
+            };
+            if let Some(item) = st.sync_item.lock().unwrap().as_ref() {
+                let _ = item.set_checked(on);
+            }
+            for w in app.webview_windows().values() {
+                let _ = w.eval(format!("MDV.setSync({on})"));
+            }
+            save_prefs(app);
+        }
         "zoom-in" | "zoom-out" | "zoom-reset" => {
             let st = app.state::<AppState>();
             let zoom = {
@@ -585,12 +929,48 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
     }
 }
 
+// 파일을 끌어 오는 동안 화면에 놓일 자리를 보여 주고, 놓으면 화면이 고른 자리로 drop_files 를 부른다.
+fn on_drag(window: &Window, event: &tauri::DragDropEvent) {
+    use tauri::DragDropEvent as D;
+    let app = window.app_handle();
+    let Some(w) = app.get_webview_window(window.label()) else {
+        return;
+    };
+    // 화면 좌표(CSS px) = 창 좌표 ÷ 확대 배율. 이름은 PhysicalPosition 이지만 실제 단위는 운영체제마다 다르다
+    // (wry 0.57: 맥·리눅스는 이미 논리 좌표, 윈도우만 물리 픽셀이라 화면 배율로 한 번 더 나눈다)
+    let x = |p: &tauri::PhysicalPosition<f64>| {
+        let sf = if cfg!(windows) {
+            window.scale_factor().unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        let zoom = app.state::<AppState>().prefs.lock().unwrap().zoom;
+        p.x / sf / zoom
+    };
+    let md = |paths: &[PathBuf]| -> Vec<PathBuf> {
+        paths.iter().filter(|p| is_markdown(p)).cloned().collect()
+    };
+    let code = match event {
+        D::Enter { paths, position } => {
+            let names: Vec<String> = md(paths).iter().map(|p| file_title(p)).collect();
+            format!("MDV.drag.enter({},{})", json(&names), x(position))
+        }
+        D::Over { position } => format!("MDV.drag.over({})", x(position)),
+        D::Drop { paths, position } => {
+            format!("MDV.drag.drop({},{})", json(&md(paths)), x(position))
+        }
+        D::Leave => "MDV.drag.leave()".into(),
+        _ => return,
+    };
+    let _ = w.eval(code);
+}
+
 fn on_window_event(window: &Window, event: &WindowEvent) {
     let app = window.app_handle();
     match event {
         WindowEvent::Destroyed => {
             let st = app.state::<AppState>();
-            st.docs.lock().unwrap().remove(window.label());
+            st.wins.lock().unwrap().remove(window.label());
             st.order.lock().unwrap().retain(|l| l != window.label());
         }
         WindowEvent::Resized(size) => {
@@ -600,31 +980,66 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
             let logical = size.to_logical::<f64>(window.scale_factor().unwrap_or(1.0));
             if !special && logical.width >= 200.0 {
                 let st = app.state::<AppState>();
+                let count = st
+                    .wins
+                    .lock()
+                    .unwrap()
+                    .get(window.label())
+                    .map_or(1, |w| w.panes.len().max(1));
                 let mut p = st.prefs.lock().unwrap();
-                p.width = logical.width;
+                p.width = logical.width / count as f64;
                 p.height = logical.height;
             }
         }
         WindowEvent::CloseRequested { .. } => save_prefs(app),
-        WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
-            for p in paths.iter().filter(|p| is_markdown(p)) {
-                open_document(app, p.clone(), None);
-            }
-        }
+        WindowEvent::DragDrop(ev) => on_drag(window, ev),
         _ => {}
     }
 }
 
 // ── 화면에서 부르는 명령 ────────────────────────────────────────────
+// 창을 만들거나 닫을 수 있는 명령은 async 로 둔다 (윈도우에서 동기 명령 안에서 창을 만들면 멈춘다).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Layout {
+    panes: Vec<u32>,
+    active: u32,
+    outline: bool,
+    sync: bool,
+    self_test: bool, // 이 창이 점검 결과를 보낸다 (자체 점검의 첫 창만)
+    scenario: bool,
+}
+
+#[tauri::command]
+fn get_layout(window: WebviewWindow, state: State<'_, AppState>) -> Result<Layout, String> {
+    let (panes, active) = {
+        let wins = state.wins.lock().unwrap();
+        let win = wins.get(window.label()).ok_or("창 정보 없음")?;
+        (win.panes.iter().map(|p| p.id).collect(), win.active)
+    };
+    let prefs = state.prefs.lock().unwrap().clone();
+    if (prefs.zoom - 1.0).abs() > 0.001 {
+        let _ = window.set_zoom(prefs.zoom);
+    }
+    Ok(Layout {
+        panes,
+        active,
+        outline: prefs.outline_open,
+        sync: prefs.sync_scroll,
+        self_test: state.self_test.is_some() && window.label() == "doc1",
+        scenario: state.self_test.as_ref().is_some_and(|t| t.scenario),
+    })
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DocPayload {
     text: String,
     title: String,
+    dir: String,
+    path: String,
     doc_url: String,
     anchor: Option<String>,
-    outline: bool,
-    self_test: bool,
 }
 
 /// reload: 감시·메뉴로 다시 읽는 경우(스크롤 유지). force 가 아니면 내용이 같을 때 None.
@@ -632,46 +1047,90 @@ struct DocPayload {
 fn load_document(
     window: WebviewWindow,
     state: State<'_, AppState>,
+    pane: u32,
     reload: bool,
     force: bool,
 ) -> Result<Option<DocPayload>, String> {
-    let label = window.label().to_string();
-    let path = state
-        .docs
-        .lock()
-        .unwrap()
-        .get(&label)
-        .map(|d| d.path.clone())
-        .ok_or("문서 정보 없음")?;
+    let label = window.label();
+    let path = {
+        let wins = state.wins.lock().unwrap();
+        wins.get(label)
+            .and_then(|w| w.panes.iter().find(|p| p.id == pane))
+            .map(|p| p.path.clone())
+            .ok_or("문서 정보 없음")?
+    };
     let text = decode(&fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
     let anchor = {
-        let mut docs = state.docs.lock().unwrap();
-        let doc = docs.get_mut(&label).ok_or("문서 정보 없음")?;
-        if reload && !force && doc.last_text.as_deref() == Some(text.as_str()) {
+        let mut wins = state.wins.lock().unwrap();
+        let p = wins
+            .get_mut(label)
+            .and_then(|w| w.panes.iter_mut().find(|p| p.id == pane))
+            .ok_or("문서 정보 없음")?;
+        if reload && !force && p.last_text.as_deref() == Some(text.as_str()) {
             return Ok(None);
         }
-        doc.last_text = Some(text.clone());
-        doc.anchor.take()
+        p.last_text = Some(text.clone());
+        p.anchor.take()
     };
-    let prefs = state.prefs.lock().unwrap().clone();
-    if !reload && (prefs.zoom - 1.0).abs() > 0.001 {
-        let _ = window.set_zoom(prefs.zoom);
-    }
     Ok(Some(DocPayload {
         title: file_title(&path),
+        dir: path
+            .parent()
+            .and_then(|d| d.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path: path.to_string_lossy().into_owned(),
         doc_url: Url::from_file_path(&path)
             .map(|u| u.to_string())
             .unwrap_or_default(),
         text,
         anchor,
-        outline: prefs.outline_open,
-        self_test: state.self_test.is_some(),
     }))
 }
 
-/// 문서 안 링크. 웹 주소는 기본 브라우저로, .md 는 새 창으로, 그 밖의 파일은 기본 앱으로.
 #[tauri::command]
-async fn open_link(app: AppHandle, window: WebviewWindow, url: String) -> Result<(), String> {
+fn set_active_pane(window: WebviewWindow, state: State<'_, AppState>, pane: u32) {
+    if let Some(w) = state.wins.lock().unwrap().get_mut(window.label()) {
+        if w.panes.iter().any(|p| p.id == pane) {
+            w.active = pane;
+        }
+    }
+}
+
+#[tauri::command]
+async fn close_pane(app: AppHandle, window: WebviewWindow, pane: u32) {
+    remove_pane(&app, window.label(), pane);
+}
+
+#[tauri::command]
+async fn pop_out_pane(app: AppHandle, window: WebviewWindow, pane: u32) {
+    pop_out(&app, window.label(), pane);
+}
+
+#[tauri::command]
+async fn drop_files(
+    app: AppHandle,
+    window: WebviewWindow,
+    paths: Vec<PathBuf>,
+    at: usize,
+    replace: Option<u32>,
+) {
+    let paths: Vec<PathBuf> = paths
+        .into_iter()
+        .filter(|p| p.is_file() && is_markdown(p))
+        .collect();
+    add_panes(&app, window.label(), paths, Some(at), replace);
+}
+
+/// 문서 안 링크. 웹 주소는 기본 브라우저로, .md 는 새 창(beside 면 옆 칸)으로, 그 밖의 파일은 기본 앱으로.
+#[tauri::command]
+async fn open_link(
+    app: AppHandle,
+    window: WebviewWindow,
+    url: String,
+    pane: u32,
+    beside: bool,
+) -> Result<(), String> {
     let u = Url::parse(&url).map_err(|e| e.to_string())?;
     match u.scheme() {
         "http" | "https" | "mailto" | "tel" | "ftp" | "ftps" => app
@@ -686,19 +1145,24 @@ async fn open_link(app: AppHandle, window: WebviewWindow, url: String) -> Result
             let path = bare
                 .to_file_path()
                 .map_err(|_| format!("파일 경로가 아님: {url}"))?;
-            let current = app
-                .state::<AppState>()
-                .docs
-                .lock()
-                .unwrap()
-                .get(window.label())
-                .map(|d| d.path.clone());
+            let (current, index) = {
+                let st = app.state::<AppState>();
+                let wins = st.wins.lock().unwrap();
+                let win = wins.get(window.label());
+                let i = win.and_then(|w| w.panes.iter().position(|p| p.id == pane));
+                (
+                    win.zip(i).map(|(w, i)| w.panes[i].path.clone()),
+                    i.unwrap_or(0),
+                )
+            };
             if current.is_some_and(|c| same_file(&c, &path)) {
                 if let Some(a) = anchor {
-                    scroll_to(&window, &a);
+                    let _ = window.eval(format!("MDV.goto({pane},{})", json(&a)));
                 }
             } else if !path.exists() {
                 return Err(format!("파일 없음: {}", path.display()));
+            } else if is_markdown(&path) && beside {
+                add_panes(&app, window.label(), vec![path], Some(index + 1), None);
             } else if is_markdown(&path) {
                 open_document(&app, path, anchor);
             } else {
@@ -727,18 +1191,46 @@ fn log_message(app: AppHandle, message: String) {
 #[tauri::command]
 fn self_test_report(app: AppHandle, state: State<'_, AppState>, report: serde_json::Value) {
     let Some(test) = &state.self_test else { return };
-    let _ = fs::write(
-        &test.report,
-        serde_json::to_string_pretty(&report).unwrap_or_default(),
-    );
-    if test.reported.swap(true, Ordering::SeqCst) {
-        return; // 끝내기 예약은 첫 보고 때 한 번만
-    }
-    let hold = test.hold;
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(hold));
-        app.exit(0);
+    let (path, hold) = (test.report.clone(), test.hold);
+    let first = !test.reported.swap(true, Ordering::SeqCst); // 끝내기 예약은 첫 보고 때 한 번만
+    let windows = app.webview_windows().len();
+    let handle = app.clone();
+    // 맥 메뉴는 메인 스레드에서만 읽을 수 있다
+    let _ = app.run_on_main_thread(move || {
+        let mut report = report;
+        report["windows"] = serde_json::json!(windows);
+        #[cfg(target_os = "macos")]
+        {
+            report["windowsMenu"] = serde_json::json!(mac_windows_menu());
+        }
+        let _ = fs::write(
+            &path,
+            serde_json::to_string_pretty(&report).unwrap_or_default(),
+        );
+        if first {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(hold));
+                handle.exit(0);
+            });
+        }
     });
+}
+
+/// 맥이 '윈도우 메뉴'로 알고 있는 메뉴의 항목들. 비어 있으면 fn+control+화살표 배치가 동작하지 않는다.
+#[cfg(target_os = "macos")]
+fn mac_windows_menu() -> Vec<String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return vec![];
+    };
+    let Some(menu) = NSApplication::sharedApplication(mtm).windowsMenu() else {
+        return vec![];
+    };
+    (0..menu.numberOfItems())
+        .filter_map(|i| menu.itemAtIndex(i))
+        .map(|item| item.title().to_string())
+        .collect()
 }
 
 // ── 기본 앱 지정 (--set-default) ─────────────────────────────────────
@@ -819,12 +1311,10 @@ fn main() {
                     Some(w) => {
                         let _ = w.set_focus();
                     }
-                    None => show_open_dialog(app),
+                    None => show_open_dialog(app, None),
                 }
             }
-            for f in more.files {
-                open_document(app, f, None);
-            }
+            open_documents(app, more.files);
         }));
     }
 
@@ -832,7 +1322,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            get_layout,
             load_document,
+            set_active_pane,
+            close_pane,
+            pop_out_pane,
+            drop_files,
             open_link,
             set_outline,
             log_message,
@@ -845,27 +1340,39 @@ fn main() {
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or_default();
+            let sync_on = prefs.sync_scroll;
             let self_test = cli.self_test.take();
             let test_file = self_test
                 .as_ref()
                 .map(|t| (t.file.clone(), t.report.clone()));
             app.manage(AppState {
-                docs: Mutex::new(HashMap::new()),
+                wins: Mutex::new(HashMap::new()),
                 order: Mutex::new(vec![]),
                 counter: AtomicUsize::new(0),
+                pane_counter: AtomicU32::new(0),
                 prefs: Mutex::new(prefs),
                 prefs_path,
                 log_path: app.path().app_log_dir()?.join("MDViewer.log"),
                 recent_menu: Mutex::new(None),
+                sync_item: Mutex::new(None),
                 self_test,
             });
-            let (menu, recent) = build_menu(&handle)?;
-            handle.set_menu(menu)?;
-            *app.state::<AppState>().recent_menu.lock().unwrap() = Some(recent);
+            let menu = build_menu(&handle, sync_on)?;
+            handle.set_menu(menu.menu)?;
+            {
+                let st = app.state::<AppState>();
+                *st.recent_menu.lock().unwrap() = Some(menu.recent);
+                *st.sync_item.lock().unwrap() = Some(menu.sync);
+            }
             refresh_recent(&handle);
 
             if let Some((file, report)) = test_file {
-                open_document(&handle, file, None);
+                // 명령줄에 문서를 더 주면 한 창에 나란히 띄워 점검한다
+                let docs = std::iter::once(file)
+                    .chain(std::mem::take(&mut cli.files))
+                    .map(|p| (p, None))
+                    .collect();
+                open_window(&handle, docs);
                 // 화면이 끝내 보고하지 않으면 시간 초과로 실패 처리
                 let h = handle.clone();
                 std::thread::spawn(move || {
@@ -878,9 +1385,7 @@ fn main() {
                 let mut files = std::mem::take(&mut cli.files);
                 #[cfg(target_os = "macos")]
                 files.append(&mut PENDING_OPEN.lock().unwrap());
-                for f in files {
-                    open_document(&handle, f, None);
-                }
+                open_documents(&handle, files);
             } else {
                 // 맥은 Finder 에서 연 파일이 조금 뒤 Opened 이벤트로 온다. 그때까지 아무것도 없으면 열기 창.
                 let h = handle.clone();
@@ -888,8 +1393,8 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(700));
                     let h2 = h.clone();
                     let _ = h.run_on_main_thread(move || {
-                        if h2.state::<AppState>().docs.lock().unwrap().is_empty() {
-                            show_open_dialog(&h2);
+                        if h2.state::<AppState>().wins.lock().unwrap().is_empty() {
+                            show_open_dialog(&h2, None);
                         }
                     });
                 });
@@ -917,11 +1422,12 @@ fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
     use tauri::RunEvent;
     match event {
         RunEvent::Opened { urls } => {
-            let paths = urls.into_iter().filter_map(|u| u.to_file_path().ok());
+            let paths: Vec<PathBuf> = urls
+                .into_iter()
+                .filter_map(|u| u.to_file_path().ok())
+                .collect();
             if app.try_state::<AppState>().is_some() {
-                for p in paths {
-                    open_document(app, p, None);
-                }
+                open_documents(app, paths);
             } else {
                 PENDING_OPEN.lock().unwrap().extend(paths);
             }
@@ -929,7 +1435,7 @@ fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
         RunEvent::Reopen {
             has_visible_windows: false,
             ..
-        } => show_open_dialog(app),
+        } => show_open_dialog(app, None),
         RunEvent::ExitRequested {
             code: None, api, ..
         } if app.state::<AppState>().self_test.is_none() => api.prevent_exit(),
