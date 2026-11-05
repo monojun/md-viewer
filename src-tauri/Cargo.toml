@@ -1,6 +1,6 @@
 [package]
 name = "md-viewer"
-version = "0.1.0"
+version = "0.2.0"
 description = "MD Viewer — 보기 전용 마크다운 뷰어"
 authors = ["monojun"]
 license = "MIT"

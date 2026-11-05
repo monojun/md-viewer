@@ -1,6 +1,6 @@
 {
   "name": "md-viewer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "보기 전용 마크다운 뷰어 (macOS·Windows·Linux). 화면은 web/, 앱 껍데기는 src-tauri/.",
   "license": "MIT",

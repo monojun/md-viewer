@@ -3,7 +3,7 @@
 이 프로젝트의 눈에 띄는 변경을 적는다. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/),
 버전 번호는 [유의적 버전](https://semver.org/lang/ko/)을 따른다.
 
-## [Unreleased]
+## [0.2.0] - 2026-11-05
 
 ### 추가
 - 나란히 보기: 한 창에 문서 2~3개를 같은 너비로 나란히 띄운다
@@ -30,4 +30,5 @@
 - 기본 테마: Pretendard 글꼴로 세 운영체제에서 같은 글자 모양
 - CI: 세 운영체제에서 빌드 후 앱을 띄워 샘플 문서 렌더 결과를 자동 점검
 
+[0.2.0]: https://github.com/monojun/md-viewer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/monojun/md-viewer/releases/tag/v0.1.0
