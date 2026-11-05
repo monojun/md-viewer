@@ -488,11 +488,13 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, Submenu<Wry>)> {
     menu = menu.item(&file.build()?).item(&edit).item(&view);
     #[cfg(target_os = "macos")]
     {
-        let window = SubmenuBuilder::new(app, "윈도우")
+        // 이 id 로 만들어야 Tauri 가 메뉴 막대를 붙인 뒤 '윈도우 메뉴'로 등록한다. 그래야 macOS 가
+        // '이동 및 크기 조절'(fn+control+화살표 타일 배치) 항목을 이 메뉴에 넣어 단축키가 동작한다.
+        // (메뉴 막대를 붙이기 전에 set_as_windows_menu_for_nsapp 를 부르면 아무 일도 일어나지 않는다)
+        let window = SubmenuBuilder::with_id(app, tauri::menu::WINDOW_SUBMENU_ID, "윈도우")
             .item(&PredefinedMenuItem::minimize(app, Some("최소화"))?)
             .item(&PredefinedMenuItem::maximize(app, Some("확대/축소"))?)
             .build()?;
-        let _ = window.set_as_windows_menu_for_nsapp();
         menu = menu.item(&window);
     }
     Ok((menu.build()?, recent))
