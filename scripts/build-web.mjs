@@ -34,4 +34,5 @@ copy(path.join(root, 'web/fonts/pretendard.css'), 'fonts/pretendard.css');
 copy(path.join(nm, 'pretendard/dist/web/variable/woff2/PretendardVariable.woff2'), 'fonts/PretendardVariable.woff2');
 copy(path.join(nm, 'mathjax/es5/tex-svg-full.js'), 'vendor/tex-svg-full.js');
 copy(path.join(nm, 'mermaid/dist/mermaid.min.js'), 'vendor/mermaid.min.js');
+copy(path.join(nm, 'codemirror/lib/codemirror.css'), 'vendor/codemirror.css');
 console.log('web → dist/');

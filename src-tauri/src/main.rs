@@ -42,6 +42,8 @@ struct Prefs {
     width: f64, // 칸 하나의 너비. 칸이 여럿이면 창은 그 배수로 연다
     height: f64,
     recent: Vec<PathBuf>,
+    // 편집 UX: "toggle"(한 번에 하나), "pane"(편집·보기 칸을 함께). 사용자가 설정에서 바꾼다.
+    edit_ui_mode: String,
 }
 
 impl Default for Prefs {
@@ -53,8 +55,18 @@ impl Default for Prefs {
             width: 900.0,
             height: 1000.0,
             recent: vec![],
+            edit_ui_mode: "toggle".into(),
         }
     }
+}
+
+// 저장 시 원문 바이트와 같게 되도록 기억해 두는 메타 정보.
+// 인코딩(UTF-8·UTF-16LE·UTF-16BE·EUC-KR), BOM 여부, 줄바꿈(CRLF 또는 LF).
+#[derive(Clone, Debug)]
+struct DocMeta {
+    encoding: &'static encoding_rs::Encoding,
+    has_bom: bool,
+    crlf: bool,
 }
 
 struct Pane {
@@ -62,6 +74,8 @@ struct Pane {
     path: PathBuf,
     anchor: Option<String>,
     last_text: Option<String>, // 감시가 같은 내용으로 여러 번 울려도 다시 그리지 않게
+    meta: Option<DocMeta>,     // 저장 시 인코딩·줄바꿈을 원본대로 되돌리려고
+    dirty: bool,               // 편집 중 저장 안 된 변경. 창 제목의 '•' 과 외부 변경 확인 바에 쓴다.
     #[allow(dead_code)]
     watcher: Option<notify::RecommendedWatcher>, // 칸이 닫혀 Pane 이 지워지면 감시도 끝난다
 }
@@ -75,7 +89,8 @@ struct SelfTest {
     file: PathBuf,
     report: PathBuf,
     hold: u64,
-    scenario: bool, // 칸 닫기·끌어다 놓기·새 창으로 떼기를 차례로 해 본다
+    scenario: bool,  // 칸 닫기·끌어다 놓기·새 창으로 떼기를 차례로 해 본다
+    roundtrip: bool, // 바이트 왕복(읽기 → 바로 쓰기) 이 같은지 확인한다
     reported: AtomicBool,
 }
 
@@ -109,7 +124,8 @@ fn parse_cli(args: impl IntoIterator<Item = String>, cwd: &Path) -> Cli {
         self_test: None,
         set_default: false,
     };
-    let (mut test_file, mut report, mut hold, mut scenario) = (None, None, 0, false);
+    let (mut test_file, mut report, mut hold, mut scenario, mut roundtrip) =
+        (None, None, 0, false, false);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -117,6 +133,7 @@ fn parse_cli(args: impl IntoIterator<Item = String>, cwd: &Path) -> Cli {
             "--report" => report = it.next().map(|f| cwd.join(f)),
             "--hold" => hold = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
             "--scenario" => scenario = true,
+            "--roundtrip" => roundtrip = true,
             "--set-default" => cli.set_default = true,
             s if s.starts_with('-') => {}
             s => {
@@ -137,6 +154,7 @@ fn parse_cli(args: impl IntoIterator<Item = String>, cwd: &Path) -> Cli {
             report,
             hold,
             scenario,
+            roundtrip,
             reported: AtomicBool::new(false),
         });
     }
@@ -144,26 +162,106 @@ fn parse_cli(args: impl IntoIterator<Item = String>, cwd: &Path) -> Cli {
 }
 
 // ── 파일 ────────────────────────────────────────────────────────────
-fn decode(bytes: &[u8]) -> String {
-    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(rest).into_owned();
+// 바이트에서 문자열과 저장용 메타를 함께 뽑는다. 문자열은 LF 로 정리해 화면(JS)에 넘기고,
+// 저장할 때 encode_full 이 메타를 보고 원본 꼴(BOM·CRLF·인코딩)로 되돌린다.
+fn decode_full(bytes: &[u8]) -> (String, DocMeta) {
+    let (raw, encoding, has_bom) = if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        (
+            String::from_utf8_lossy(rest).into_owned(),
+            encoding_rs::UTF_8,
+            true,
+        )
+    } else if bytes.starts_with(&[0xFF, 0xFE]) {
+        (
+            encoding_rs::UTF_16LE
+                .decode_with_bom_removal(bytes)
+                .0
+                .into_owned(),
+            encoding_rs::UTF_16LE,
+            true,
+        )
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        (
+            encoding_rs::UTF_16BE
+                .decode_with_bom_removal(bytes)
+                .0
+                .into_owned(),
+            encoding_rs::UTF_16BE,
+            true,
+        )
+    } else if let Ok(s) = std::str::from_utf8(bytes) {
+        (s.to_owned(), encoding_rs::UTF_8, false)
+    } else {
+        // CP949 (옛 한글 문서)
+        (
+            encoding_rs::EUC_KR.decode(bytes).0.into_owned(),
+            encoding_rs::EUC_KR,
+            false,
+        )
+    };
+    // 첫 LF 바로 앞이 CR 이면 CRLF 로 본다 (혼합 문서는 드물고, 왕복 보존을 쉽게)
+    let crlf = raw
+        .as_bytes()
+        .windows(2)
+        .find(|w| w[1] == b'\n')
+        .is_some_and(|w| w[0] == b'\r');
+    let normalized = if crlf { raw.replace("\r\n", "\n") } else { raw };
+    (
+        normalized,
+        DocMeta {
+            encoding,
+            has_bom,
+            crlf,
+        },
+    )
+}
+
+// 문자열 + 메타 → 저장용 바이트. decode_full 이 벗겨 둔 BOM·CRLF 를 다시 붙이고 원래 인코딩으로 바꾼다.
+fn encode_full(text: &str, meta: &DocMeta) -> Vec<u8> {
+    let with_crlf;
+    let src: &str = if meta.crlf {
+        with_crlf = text.replace('\n', "\r\n");
+        &with_crlf
+    } else {
+        text
+    };
+    let mut out = Vec::new();
+    if meta.has_bom {
+        match meta.encoding.name() {
+            "UTF-8" => out.extend_from_slice(&[0xEF, 0xBB, 0xBF]),
+            "UTF-16LE" => out.extend_from_slice(&[0xFF, 0xFE]),
+            "UTF-16BE" => out.extend_from_slice(&[0xFE, 0xFF]),
+            _ => {}
+        }
     }
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        return encoding_rs::UTF_16LE
-            .decode_with_bom_removal(bytes)
-            .0
-            .into_owned();
+    // encoding_rs 는 UTF-16 을 '내보내기 인코딩' 으로는 쓰지 않으므로(WHATWG: UTF-8 로 돌림) 직접 짠다.
+    match meta.encoding.name() {
+        "UTF-16LE" => {
+            for u in src.encode_utf16() {
+                out.push((u & 0xff) as u8);
+                out.push((u >> 8) as u8);
+            }
+        }
+        "UTF-16BE" => {
+            for u in src.encode_utf16() {
+                out.push((u >> 8) as u8);
+                out.push((u & 0xff) as u8);
+            }
+        }
+        _ => {
+            let (encoded, _, _) = meta.encoding.encode(src);
+            out.extend_from_slice(&encoded);
+        }
     }
-    if bytes.starts_with(&[0xFE, 0xFF]) {
-        return encoding_rs::UTF_16BE
-            .decode_with_bom_removal(bytes)
-            .0
-            .into_owned();
-    }
-    match std::str::from_utf8(bytes) {
-        Ok(s) => s.to_owned(),
-        Err(_) => encoding_rs::EUC_KR.decode(bytes).0.into_owned(), // CP949 (옛 한글 문서)
-    }
+    out
+}
+
+// 테스트용: 파일 전체 왕복(읽기 → 바로 쓰기) 이 같은 바이트인지 검사한다. --roundtrip 과 자체 점검에서 쓴다.
+fn check_roundtrip(path: &Path) -> std::io::Result<(bool, usize)> {
+    let bytes = fs::read(path)?;
+    let (text, meta) = decode_full(&bytes);
+    let encoded = encode_full(&text, &meta);
+    Ok((encoded == bytes, bytes.len()))
 }
 
 fn is_markdown(p: &Path) -> bool {
@@ -236,6 +334,8 @@ fn new_pane(app: &AppHandle, label: &str, path: PathBuf, anchor: Option<String>)
         path,
         anchor,
         last_text: None,
+        meta: None,
+        dirty: false,
     }
 }
 
@@ -279,11 +379,17 @@ fn is_app_url(url: &Url) -> bool {
 }
 
 fn titles_of(win: &Win) -> String {
-    win.panes
+    let base = win
+        .panes
         .iter()
         .map(|p| file_title(&p.path))
         .collect::<Vec<_>>()
-        .join("  ·  ")
+        .join("  ·  ");
+    if win.panes.iter().any(|p| p.dirty) {
+        format!("• {base}")
+    } else {
+        base
+    }
 }
 
 fn update_title(app: &AppHandle, label: &str) {
@@ -692,6 +798,10 @@ fn item(app: &AppHandle, id: &str, text: &str, accel: &str) -> tauri::Result<Men
         .build(app)
 }
 
+fn item_noacc(app: &AppHandle, id: &str, text: &str) -> tauri::Result<MenuItem<Wry>> {
+    MenuItemBuilder::with_id(id, text).build(app)
+}
+
 struct AppMenu {
     menu: Menu<Wry>,
     recent: Submenu<Wry>,
@@ -712,6 +822,9 @@ fn build_menu(app: &AppHandle, sync_on: bool) -> tauri::Result<AppMenu> {
         .item(&item(app, "open", "열기…", "CmdOrCtrl+O")?)
         .item(&item(app, "open-beside", "옆에 열기…", "Alt+CmdOrCtrl+O")?)
         .item(&recent)
+        .separator()
+        .item(&item(app, "save", "저장", "CmdOrCtrl+S")?)
+        .item(&item(app, "save-as", "다른 이름으로 저장…", "Shift+CmdOrCtrl+S")?)
         .separator()
         .item(&item(app, "reveal", reveal, "Shift+CmdOrCtrl+R")?)
         .separator()
@@ -742,6 +855,11 @@ fn build_menu(app: &AppHandle, sync_on: bool) -> tauri::Result<AppMenu> {
     let view = SubmenuBuilder::new(app, "보기")
         .item(&item(app, "outline", "개요 사이드바", "Shift+CmdOrCtrl+L")?)
         .item(&sync)
+        .separator()
+        .item(&item(app, "edit-toggle", "편집 모드", "CmdOrCtrl+E")?)
+        .item(&item(app, "open-edit-pane", "편집 칸으로 열기", "Alt+CmdOrCtrl+E")?)
+        .item(&item_noacc(app, "ui-toggle", "편집 UX: 토글 모드")?)
+        .item(&item_noacc(app, "ui-pane", "편집 UX: 칸 모드")?)
         .separator()
         .item(&item(app, "zoom-reset", "실제 크기", "CmdOrCtrl+0")?)
         .item(&item(app, "zoom-in", "확대", "CmdOrCtrl+=")?)
@@ -851,6 +969,12 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
             }
         }
         "quit" => app.exit(0),
+        "save" => js("MDV.save()"),
+        "save-as" => js("MDV.saveAs()"),
+        "edit-toggle" => js("MDV.toggleEdit()"),
+        "open-edit-pane" => js("MDV.openEditPane()"),
+        "ui-toggle" => set_edit_ui_mode(app.clone(), app.state::<AppState>(), "toggle".into()),
+        "ui-pane" => set_edit_ui_mode(app.clone(), app.state::<AppState>(), "pane".into()),
         "find" => js("MDV.find.open()"),
         "find-next" => js("MDV.find.next()"),
         "find-prev" => js("MDV.find.prev()"),
@@ -1006,8 +1130,10 @@ struct Layout {
     active: u32,
     outline: bool,
     sync: bool,
+    edit_ui_mode: String,
     self_test: bool, // 이 창이 점검 결과를 보낸다 (자체 점검의 첫 창만)
     scenario: bool,
+    roundtrip: Option<String>, // --self-test --roundtrip 모드일 때 검사할 파일 경로
 }
 
 #[tauri::command]
@@ -1021,13 +1147,22 @@ fn get_layout(window: WebviewWindow, state: State<'_, AppState>) -> Result<Layou
     if (prefs.zoom - 1.0).abs() > 0.001 {
         let _ = window.set_zoom(prefs.zoom);
     }
+    let roundtrip = state.self_test.as_ref().and_then(|t| {
+        if t.roundtrip {
+            Some(t.file.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    });
     Ok(Layout {
         panes,
         active,
         outline: prefs.outline_open,
         sync: prefs.sync_scroll,
+        edit_ui_mode: prefs.edit_ui_mode,
         self_test: state.self_test.is_some() && window.label() == "doc1",
         scenario: state.self_test.as_ref().is_some_and(|t| t.scenario),
+        roundtrip,
     })
 }
 
@@ -1059,7 +1194,8 @@ fn load_document(
             .map(|p| p.path.clone())
             .ok_or("문서 정보 없음")?
     };
-    let text = decode(&fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+    let (text, meta) =
+        decode_full(&fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
     let anchor = {
         let mut wins = state.wins.lock().unwrap();
         let p = wins
@@ -1070,6 +1206,9 @@ fn load_document(
             return Ok(None);
         }
         p.last_text = Some(text.clone());
+        p.meta = Some(meta);
+        // 디스크와 같은 내용을 다시 읽었으므로 더 이상 변경 중이 아니다
+        p.dirty = false;
         p.anchor.take()
     };
     Ok(Some(DocPayload {
@@ -1088,6 +1227,155 @@ fn load_document(
     }))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveResult {
+    path: String,
+    bytes: usize,
+}
+
+fn do_save(
+    app: &AppHandle,
+    label: &str,
+    pane: u32,
+    path: Option<PathBuf>,
+    text: &str,
+) -> Result<SaveResult, String> {
+    let st = app.state::<AppState>();
+    let (save_path, meta, old_path) = {
+        let wins = st.wins.lock().unwrap();
+        let p = wins
+            .get(label)
+            .and_then(|w| w.panes.iter().find(|p| p.id == pane))
+            .ok_or("문서 정보 없음")?;
+        let save_path = path.unwrap_or_else(|| p.path.clone());
+        let meta = p.meta.clone().unwrap_or(DocMeta {
+            encoding: encoding_rs::UTF_8,
+            has_bom: false,
+            crlf: false,
+        });
+        (save_path, meta, p.path.clone())
+    };
+    let bytes = encode_full(text, &meta);
+    fs::write(&save_path, &bytes).map_err(|e| format!("{}: {e}", save_path.display()))?;
+    let path_changed = save_path != old_path;
+    {
+        let mut wins = st.wins.lock().unwrap();
+        let p = wins
+            .get_mut(label)
+            .and_then(|w| w.panes.iter_mut().find(|p| p.id == pane))
+            .ok_or("문서 정보 없음")?;
+        // 디스크에 방금 쓴 내용을 '마지막으로 본 내용' 으로. 감시 이벤트가 되돌아와도 다시 그리지 않는다.
+        p.last_text = Some(text.to_string());
+        p.dirty = false;
+        if path_changed {
+            p.path = canonical(save_path.clone());
+            p.watcher = watch_file(app, label, pane, &p.path);
+        }
+    }
+    update_title(app, label);
+    if path_changed {
+        remember_recent(app, &save_path);
+    }
+    let size = bytes.len();
+    Ok(SaveResult {
+        path: save_path.to_string_lossy().into_owned(),
+        bytes: size,
+    })
+}
+
+/// 문서 저장. text 는 화면(CodeMirror)의 현재 소스. 메타(인코딩·BOM·CRLF)는 칸이 기억한 원본 꼴 그대로.
+/// path 를 주면 '다른 이름으로 저장'(새 경로), 주지 않으면 원 경로에 덮어쓴다.
+#[tauri::command]
+fn save_document(
+    app: AppHandle,
+    window: WebviewWindow,
+    pane: u32,
+    path: Option<String>,
+    text: String,
+) -> Result<SaveResult, String> {
+    let label = window.label().to_string();
+    let path = path.filter(|s| !s.is_empty()).map(PathBuf::from);
+    do_save(&app, &label, pane, path, &text)
+}
+
+/// '다른 이름으로 저장' 대화상자를 연다. 사용자가 고르면 그 경로로 저장. 취소하면 아무 일도 안 한다.
+#[tauri::command]
+async fn save_document_as(
+    app: AppHandle,
+    window: WebviewWindow,
+    pane: u32,
+    text: String,
+) -> Result<Option<SaveResult>, String> {
+    let (label, suggest_name) = {
+        let st = app.state::<AppState>();
+        let wins = st.wins.lock().unwrap();
+        let p = wins
+            .get(window.label())
+            .and_then(|w| w.panes.iter().find(|p| p.id == pane))
+            .ok_or("문서 정보 없음")?;
+        (window.label().to_string(), file_title(&p.path))
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+    app.dialog()
+        .file()
+        .set_title("다른 이름으로 저장")
+        .add_filter("Markdown", MD_EXTS)
+        .set_file_name(&suggest_name)
+        .save_file(move |picked| {
+            let _ = tx.send(picked.and_then(|f| f.into_path().ok()));
+        });
+    let picked = rx.recv().map_err(|e| e.to_string())?;
+    let Some(path) = picked else { return Ok(None) };
+    let res = do_save(&app, &label, pane, Some(path), &text)?;
+    Ok(Some(res))
+}
+
+/// 화면이 알려 주는 '저장 안 된 변경' 상태. 창 제목 '•' 와 외부 변경 처리에 쓴다.
+#[tauri::command]
+fn mark_dirty(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    pane: u32,
+    dirty: bool,
+) {
+    let label = window.label().to_string();
+    let changed = {
+        let mut wins = state.wins.lock().unwrap();
+        let Some(win) = wins.get_mut(&label) else {
+            return;
+        };
+        let Some(p) = win.panes.iter_mut().find(|p| p.id == pane) else {
+            return;
+        };
+        if p.dirty == dirty {
+            false
+        } else {
+            p.dirty = dirty;
+            true
+        }
+    };
+    if changed {
+        update_title(&app, &label);
+    }
+}
+
+/// --roundtrip 전용(그리고 자체 점검) 바이트 왕복 검사. 화면이 아직 없을 때도 쓴다.
+#[tauri::command]
+fn roundtrip_check_cmd(path: String) -> Result<RoundtripReport, String> {
+    let p = PathBuf::from(&path);
+    let (ok, bytes) = check_roundtrip(&p).map_err(|e| format!("{path}: {e}"))?;
+    Ok(RoundtripReport { ok, bytes })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoundtripReport {
+    ok: bool,
+    bytes: usize,
+}
+
 #[tauri::command]
 fn set_active_pane(window: WebviewWindow, state: State<'_, AppState>, pane: u32) {
     if let Some(w) = state.wins.lock().unwrap().get_mut(window.label()) {
@@ -1100,6 +1388,38 @@ fn set_active_pane(window: WebviewWindow, state: State<'_, AppState>, pane: u32)
 #[tauri::command]
 async fn close_pane(app: AppHandle, window: WebviewWindow, pane: u32) {
     remove_pane(&app, window.label(), pane);
+}
+
+/// Pane UX: 같은 파일 경로의 '편집 칸' 을 만든다. add_panes 는 같은 경로의 중복 칸을 막지만,
+/// 편집 칸 + 보기 칸을 함께 두는 Pane UX 에서는 중복이 필요하다. mode 는 frontend 가 가진다.
+#[tauri::command]
+async fn add_edit_pane(app: AppHandle, window: WebviewWindow, path: String) -> Result<u32, String> {
+    let label = window.label().to_string();
+    let path = canonical(PathBuf::from(path));
+    let (before, after, pane_id) = {
+        let st = app.state::<AppState>();
+        let mut wins = st.wins.lock().unwrap();
+        let win = wins.get_mut(&label).ok_or("창 정보 없음")?;
+        let before = win.panes.len();
+        if before >= MAX_PANES {
+            return Err("칸이 꽉 찼습니다".into());
+        }
+        let pane = new_pane(&app, &label, path.clone(), None);
+        let id = pane.id;
+        win.active = id;
+        win.panes.push(pane);
+        (before, win.panes.len(), id)
+    };
+    let w = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "창을 찾지 못함".to_string())?;
+    let _ = w.eval(format!(
+        "MDV.addPane({pane_id},{idx},\"edit\");MDV.focusPane({pane_id});",
+        idx = after - 1
+    ));
+    update_title(&app, &label);
+    resize_for_panes(&w, before, after);
+    Ok(pane_id)
 }
 
 #[tauri::command]
@@ -1180,6 +1500,17 @@ async fn open_link(
 fn set_outline(app: AppHandle, state: State<'_, AppState>, open: bool) {
     state.prefs.lock().unwrap().outline_open = open;
     save_prefs(&app);
+}
+
+/// 편집 UX 모드 저장 ("toggle" | "pane"). 설정 창이 따로 없어, 보기 메뉴의 두 항목으로 고른다.
+#[tauri::command]
+fn set_edit_ui_mode(app: AppHandle, state: State<'_, AppState>, mode: String) {
+    let mode = if mode == "pane" { "pane" } else { "toggle" };
+    state.prefs.lock().unwrap().edit_ui_mode = mode.into();
+    save_prefs(&app);
+    for w in app.webview_windows().values() {
+        let _ = w.eval(format!("MDV.setEditUiMode({})", json(&mode)));
+    }
 }
 
 #[tauri::command]
@@ -1298,6 +1629,27 @@ fn main() {
     if cli.set_default {
         std::process::exit(set_default_handler());
     }
+    // `--self-test <md> --roundtrip` (화면 없이): 바이트 왕복만 확인하고 끝낸다.
+    // --scenario 와 함께 쓰면 화면 점검에서 왕복 결과도 보고하도록 Layout 으로 넘긴다.
+    if let Some(t) = cli.self_test.as_ref() {
+        if t.roundtrip && !t.scenario {
+            let res = check_roundtrip(&t.file);
+            let (ok, bytes, err) = match res {
+                Ok((ok, b)) => (ok, b, None),
+                Err(e) => (false, 0, Some(e.to_string())),
+            };
+            let report = serde_json::json!({
+                "mode": "roundtrip",
+                "roundtrip": { "ok": ok, "bytes": bytes, "error": err },
+                "file": t.file.to_string_lossy(),
+            });
+            let _ = fs::write(
+                &t.report,
+                serde_json::to_string_pretty(&report).unwrap_or_default(),
+            );
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+    }
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
@@ -1324,12 +1676,18 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_layout,
             load_document,
+            save_document,
+            save_document_as,
+            mark_dirty,
+            roundtrip_check_cmd,
             set_active_pane,
             close_pane,
+            add_edit_pane,
             pop_out_pane,
             drop_files,
             open_link,
             set_outline,
+            set_edit_ui_mode,
             log_message,
             self_test_report
         ])
@@ -1446,3 +1804,91 @@ fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
 // 윈도우·리눅스는 파일을 명령줄 인자로 받고, 마지막 창을 닫으면 끝난다 (기본 동작).
 #[cfg(not(target_os = "macos"))]
 fn on_run_event(_app: &AppHandle, _event: tauri::RunEvent) {}
+
+// ── 테스트 ─────────────────────────────────────────────────────────
+// decode_full → encode_full 이 원본 바이트를 그대로 되돌리는지 확인한다.
+// 자체 점검의 --roundtrip 은 이 두 함수를 샘플 문서에 적용해 바이트가 같은지 본다.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rt(bytes: &[u8]) {
+        let (text, meta) = decode_full(bytes);
+        let out = encode_full(&text, &meta);
+        assert_eq!(
+            out, bytes,
+            "roundtrip mismatch: meta={:?}, text_len={}",
+            meta,
+            text.len()
+        );
+    }
+
+    #[test]
+    fn roundtrip_utf8_lf() {
+        rt(b"hello\n\xea\xb0\x80\xeb\x82\x98\n");
+    }
+
+    #[test]
+    fn roundtrip_utf8_bom_lf() {
+        let mut v = vec![0xEF, 0xBB, 0xBF];
+        v.extend_from_slice(b"title\n\xec\x95\x88\xeb\x85\x95\n");
+        rt(&v);
+    }
+
+    #[test]
+    fn roundtrip_utf8_crlf() {
+        rt(b"a\r\nb\r\n\xea\xb0\x80\r\n");
+    }
+
+    #[test]
+    fn roundtrip_utf8_bom_crlf() {
+        let mut v = vec![0xEF, 0xBB, 0xBF];
+        v.extend_from_slice(b"x\r\ny\r\n");
+        rt(&v);
+    }
+
+    #[test]
+    fn roundtrip_utf16le_bom() {
+        // "가\n나\n"
+        let s = "가\n나\n";
+        let mut v: Vec<u8> = vec![0xFF, 0xFE];
+        for u in s.encode_utf16() {
+            v.push((u & 0xff) as u8);
+            v.push((u >> 8) as u8);
+        }
+        rt(&v);
+    }
+
+    #[test]
+    fn roundtrip_utf16be_bom() {
+        let s = "가\n나\n";
+        let mut v: Vec<u8> = vec![0xFE, 0xFF];
+        for u in s.encode_utf16() {
+            v.push((u >> 8) as u8);
+            v.push((u & 0xff) as u8);
+        }
+        rt(&v);
+    }
+
+    #[test]
+    fn roundtrip_euc_kr() {
+        // '가' = 0xB0 0xA1 in EUC-KR
+        rt(&[0xB0, 0xA1, b'\n']);
+    }
+
+    #[test]
+    fn roundtrip_empty() {
+        rt(b"");
+    }
+
+    #[test]
+    fn roundtrip_utf16le_crlf() {
+        let s = "가\r\n나\r\n";
+        let mut v: Vec<u8> = vec![0xFF, 0xFE];
+        for u in s.encode_utf16() {
+            v.push((u & 0xff) as u8);
+            v.push((u >> 8) as u8);
+        }
+        rt(&v);
+    }
+}

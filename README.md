@@ -4,8 +4,8 @@
 [![release](https://img.shields.io/github/v/release/monojun/md-viewer)](https://github.com/monojun/md-viewer/releases/latest)
 [![license](https://img.shields.io/github/license/monojun/md-viewer)](LICENSE)
 
-마크다운(.md) 문서를 **읽기 좋은 문서 모양으로 보여 주기만** 하는 가벼운 앱. macOS·Windows·Linux 용.
-편집 기능은 없다. 다른 편집기(VS Code 등)에서 저장하면 열려 있는 창이 바로 다시 그려진다.
+마크다운(.md) 문서를 **읽기 좋은 문서 모양으로 보여 주는** 가벼운 앱. macOS·Windows·Linux 용.
+보기 전용이 기본이고, 필요할 때 편집(⌘E)으로 전환해 저장할 수 있다. 다른 편집기에서 저장해도 열려 있는 창이 바로 다시 그려진다.
 
 ![MD Viewer 화면](docs/screenshot.png)
 
@@ -47,6 +47,18 @@
 | `⌘R` | 다시 읽기 (보통은 저장하면 자동 반영) |
 | `⌘P` | 프린트 — 프린트 창에서 PDF 로 저장 |
 | `⇧⌘R` | 파일이 있는 폴더 보기 |
+| `⌘E` | 편집 모드 ↔ 보기 모드 (지금 칸) |
+| `⌥⌘E` | 편집 칸으로 열기 (지금 문서를 편집 칸으로 하나 더) |
+| `⌘S` / `⇧⌘S` | 저장 / 다른 이름으로 저장 (편집 중일 때) |
+
+### 편집
+
+처음에는 보기만 보여 주고, `⌘E` 로 편집기(CodeMirror 5)로 바꾼다.
+- **저장 시 원본 꼴 보존** — UTF-8/UTF-16 BOM 과 CRLF/LF 줄바꿈, EUC-KR(CP949) 인코딩을 그대로 되살려 쓴다. "변경 없이 저장" 왕복은 바이트가 똑같다.
+- **외부 변경 안전** — 편집 중에 파일이 바깥에서 바뀌면 자동으로 덮어쓰지 않고, 칸 위 안내바에서 "내 변경 지키기 / 디스크로 되돌리기" 를 고른다.
+- **편집 UX 두 가지** — 보기 › 편집 UX 에서 고른다 (환경설정에 저장).
+  - **토글 모드** (기본) — 한 번에 하나. `⌘E` 로 지금 칸을 통째로 편집기로 바꾸고, 다시 누르면 돌아온다.
+  - **칸 모드** — 편집 칸과 보기 칸이 함께 있다 (`⌥⌘E` 로 편집 칸을 하나 더 띄운다). 편집 내용이 500ms 뒤 옆 보기 칸에 그려지고, 커서 위치를 따라 같은 소스 줄의 블록으로 함께 스크롤된다.
 
 ### 나란히 보기 (한 창에 2~3개)
 
@@ -84,6 +96,7 @@ samples/sample.md   모든 요소가 들어 있는 샘플 (자체 점검 기준)
 | 앱 껍데기 | [Tauri 2](https://tauri.app) (Rust) — macOS WebKit · Windows WebView2 · Linux WebKitGTK |
 | 마크다운 | markdown-it (+ 각주·할 일·이모지·front matter) |
 | 코드 색칠 · 수식 · 다이어그램 | CodeMirror 5 토크나이저 · MathJax 3 (SVG) · Mermaid 11 — 수식·다이어그램은 쓰는 문서에서만 불러온다 |
+| 편집기 | CodeMirror 5 (쓰는 Markdown 모드) — 코드 색칠과 같은 라이브러리를 그대로 쓴다 |
 | 글꼴 | Pretendard (본문), 시스템 고정폭 글꼴 (코드) |
 
 함께 들어간 공개 소프트웨어: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
@@ -108,6 +121,13 @@ node scripts/check-selftest.mjs r.json                    # 기준과 비교
 md-viewer --self-test samples/sample.md --report r3.json samples/sample.md samples/sample.md   # 세 칸 나란히
 node scripts/check-selftest.mjs r3.json "" 3
 md-viewer --self-test samples/sample.md --report rs.json --scenario other.md   # 칸 닫기 → 끌어다 놓기 → 새 창으로 떼기
+md-viewer --self-test samples/sample.md --roundtrip --report rt.json           # 편집 → 저장 왕복이 바이트 동일한지 (화면 없이)
+```
+
+편집 기능의 바이트 왕복 보존(BOM·CRLF·인코딩)은 `cargo test` 로도 확인한다:
+
+```bash
+cd src-tauri && cargo test   # decode_full / encode_full 왕복 검사 9가지
 ```
 
 CI(GitHub Actions)는 세 운영체제에서 빌드한 뒤 앱을 실제로 띄워 이 세 가지 점검을 하고, 화면 캡처를 함께 남긴다 (`scripts/ci-selftest.*`).
