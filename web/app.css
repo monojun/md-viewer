@@ -232,10 +232,80 @@ body.outline-open #dropzone { left: var(--side-w); }
 }
 .drop-cell.target span { font-size: 14px; font-weight: 600; }
 
+/* 편집 모드 — 편집기는 보기 영역과 자리를 바꾼다 (Toggle UX),
+   Pane UX 에서는 처음부터 편집기만 보인다 (view 칸은 그대로 보기 영역). */
+.pane-edit {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.pane.editing .pane-scroll { display: none; }
+.pane.editing .pane-edit { display: flex; }
+
+.mdv-editor {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.mdv-editor .CodeMirror {
+  flex: 1;
+  height: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  line-height: 1.55;
+  background: #fff;
+  color: #24272c;
+}
+.mdv-editor .CodeMirror-lines { padding: 22px 32px; }
+.mdv-editor .CodeMirror-scroll { min-height: 100%; }
+
+/* 편집 모드 표시 (제목 왼쪽 점) 는 창 제목에 '•' 접두로 켠다. 여기 머리 영역 은 보기/편집 토글 버튼 자리. */
+.pane-edit-btn {
+  display: none; /* 보기 전용일 때 숨김 */
+}
+body.multi .pane-edit-btn,
+.pane.editing .pane-edit-btn { display: grid; }
+.pane.editing .pane-edit-btn { color: var(--accent, #2a64d0); }
+
+/* Pane UX — edit/view 모드 뱃지 (pane-mode 로 구별) */
+.pane[data-mode="edit"] .pane-name::before { content: "✎ "; color: var(--accent, #2a64d0); }
+
+/* 편집 모드 저장 안 된 변경 표시 */
+.pane.dirty .pane-name::after { content: " •"; color: var(--accent, #2a64d0); }
+
+/* 외부 변경 확인 바 — dirty 인 상태에서 파일이 바깥에서 바뀌면 */
+.pane-conflict {
+  display: none;
+  flex: none;
+  gap: 8px;
+  padding: 8px 14px;
+  font-family: var(--ui-font);
+  font-size: 12.5px;
+  color: #6a4a00;
+  background: #fff8db;
+  border-bottom: 1px solid #f0d87a;
+  align-items: center;
+}
+.pane-conflict.show { display: flex; }
+.pane-conflict button {
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid #d9b94b;
+  border-radius: 4px;
+  cursor: default;
+}
+.pane-conflict button:hover { background: #fff3c4; }
+.pane-conflict .pane-conflict-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 프린트 — 지금 칸 하나만, 스크롤 없이 전부 */
 @media print {
   html, body { height: auto; overflow: visible; }
-  #sidebar, #findbar, #dropzone, .pane-head { display: none !important; }
+  #sidebar, #findbar, #dropzone, .pane-head, .pane-edit, .pane-conflict { display: none !important; }
+  .pane.editing .pane-scroll { display: block !important; }
   #content { position: static; display: block; }
   .pane:not(.active) { display: none; }
   .pane + .pane { border: 0; }

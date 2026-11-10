@@ -105,6 +105,21 @@ function headingIds(state) {
   }
 }
 
+// 블록 토큰마다 원문 몇 번째 줄에서 왔는지 data-sl 로 적는다 (편집기 ↔ 프리뷰 스크롤 동기화)
+// html_block 처럼 열고-닫는 짝이 없는 토큰도 있으므로 토큰 종류를 명시해 고른다.
+const SL_TYPES = new Set([
+  'heading_open', 'paragraph_open', 'blockquote_open', 'bullet_list_open',
+  'ordered_list_open', 'list_item_open', 'table_open',
+  'fence', 'code_block', 'math_block', 'hr', 'html_block',
+]);
+function sourceLines(state) {
+  for (const tok of state.tokens) {
+    if (tok.map && SL_TYPES.has(tok.type)) {
+      tok.attrSet('data-sl', String(tok.map[0]));
+    }
+  }
+}
+
 export function createMarkdown() {
   const md = new MarkdownIt({ html: true, linkify: true, breaks: true, typographer: false });
   md.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
@@ -118,6 +133,7 @@ export function createMarkdown() {
   md.core.ruler.push('toc', tocRule);
   md.core.ruler.push('loose_lists', looseLists);
   md.core.ruler.push('heading_ids', headingIds);
+  md.core.ruler.push('source_lines', sourceLines);
 
   const r = md.renderer.rules;
 
@@ -125,16 +141,22 @@ export function createMarkdown() {
   // 수식·다이어그램 원문은 HTML 속성에 넣지 않고 env.sources 로 넘긴다
   // (DOMPurify 가 '-->' 같은 값이 든 속성을 지우기 때문)
   const source = (env, text) => (env.sources || (env.sources = [])).push(text) - 1;
-  r.math_block = (tokens, idx, options, env) => `<div class="md-math-block" data-source="${source(env, tokens[idx].content)}"></div>\n`;
-
-  const fence = (code, info, env) => {
-    const lang = (info || '').trim().split(/\s+/)[0] || '';
-    const body = code.replace(/\n$/, '');
-    if (lang.toLowerCase() === 'mermaid') return `<div class="md-diagram" data-source="${source(env, body)}"></div>\n`;
-    return `<pre class="md-fences"${lang ? ` lang="${escapeHtml(lang)}"` : ''}><code>${highlight(body, lang)}</code></pre>\n`;
+  const slAttr = (tok) => {
+    const sl = tok.attrGet('data-sl');
+    return sl == null ? '' : ` data-sl="${sl}"`;
   };
-  r.fence = (tokens, idx, options, env) => fence(tokens[idx].content, tokens[idx].info, env);
-  r.code_block = (tokens, idx, options, env) => fence(tokens[idx].content, '', env);
+  r.math_block = (tokens, idx, options, env) =>
+    `<div class="md-math-block"${slAttr(tokens[idx])} data-source="${source(env, tokens[idx].content)}"></div>\n`;
+
+  const fence = (tok, env) => {
+    const lang = (tok.info || '').trim().split(/\s+/)[0] || '';
+    const body = tok.content.replace(/\n$/, '');
+    if (lang.toLowerCase() === 'mermaid')
+      return `<div class="md-diagram"${slAttr(tok)} data-source="${source(env, body)}"></div>\n`;
+    return `<pre class="md-fences"${slAttr(tok)}${lang ? ` lang="${escapeHtml(lang)}"` : ''}><code>${highlight(body, lang)}</code></pre>\n`;
+  };
+  r.fence = (tokens, idx, options, env) => fence(tokens[idx], env);
+  r.code_block = (tokens, idx, options, env) => fence(tokens[idx], env);
 
   // 각주 — 정의를 [^이름]: 모양으로 보여 준다
   r.footnote_caption = (tokens, idx) => String(tokens[idx].meta.id + 1);

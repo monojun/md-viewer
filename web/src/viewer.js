@@ -4,6 +4,7 @@
 // 칸 번호는 껍데기가 정한다(앱 전체에서 하나뿐). 메뉴 명령(찾기·개요·닫기 등)은 '지금 칸'(active)에 적용된다.
 import DOMPurify from 'dompurify';
 import { createMarkdown, slugify, rootUrlFromFrontMatter } from './markdown.js';
+import { createEditor } from './editor.js';
 
 const md = createMarkdown();
 const $ = (sel) => document.querySelector(sel);
@@ -121,46 +122,109 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 8 8M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   close:
     '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  edit:
+    '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2.5 11.5V13.5H4.5L11.6 6.4L9.6 4.4L2.5 11.5Z M10.4 3.6L11.5 2.5A1 1 0 0 1 12.9 2.5L13.5 3.1A1 1 0 0 1 13.5 4.5L12.4 5.6Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
+
+let editUiMode = 'toggle'; // 'toggle' | 'pane' — 백엔드가 설정 변화 시 MDV.setEditUiMode 로 바꾼다
 
 // ── 칸 ──────────────────────────────────────────────────────────────
 class Pane {
-  constructor(id) {
+  constructor(id, mode = 'view') {
     this.id = id;
     this.seq = 0;
     this.sources = [];
     this.docURL = null;
     this.baseURL = location.href;
     this.reloadTimer = 0;
+    this.mode = mode; // 'view' | 'edit'
+    this.editor = null; // CodeMirror 편집기 핸들 (edit 모드에서만)
+    this.source = ''; // 편집 중일 때는 CodeMirror 의 현재 값, 그 외에는 파일 내용과 같다
+    this.fileText = ''; // 마지막으로 읽은 디스크 내용 (dirty 판정 기준)
+    this.dirty = false;
+    this.pendingExternal = null; // 편집 중 외부 변경이 오면 보류한 디스크 내용
 
     this.el = document.createElement('section');
     this.el.className = 'pane';
     this.el.dataset.id = id;
+    this.el.dataset.mode = mode;
     this.el.innerHTML = `
       <header class="pane-head">
         <span class="pane-name"></span><span class="pane-dir"></span>
+        <button class="pane-btn pane-edit-btn" title="편집 (⌘E)">${ICONS.edit}</button>
         <button class="pane-btn pane-popout" title="이 칸을 새 창으로">${ICONS.popout}</button>
         <button class="pane-btn pane-close" title="칸 닫기">${ICONS.close}</button>
       </header>
-      <div class="pane-scroll" tabindex="-1"><article class="write"></article></div>`;
+      <div class="pane-conflict" role="alert">
+        <span class="pane-conflict-msg">파일이 바깥에서 바뀌었습니다. 내 변경을 지키려면 왼쪽, 디스크 내용으로 되돌리려면 오른쪽.</span>
+        <button class="pane-conflict-keep">내 변경 지키기</button>
+        <button class="pane-conflict-reload">디스크로 되돌리기</button>
+      </div>
+      <div class="pane-scroll" tabindex="-1"><article class="write"></article></div>
+      <div class="pane-edit"></div>`;
     this.head = this.el.querySelector('.pane-head');
     this.scroller = this.el.querySelector('.pane-scroll');
     this.write = this.el.querySelector('.write');
+    this.editHost = this.el.querySelector('.pane-edit');
+    this.conflict = this.el.querySelector('.pane-conflict');
 
     this.el.addEventListener('pointerdown', () => setActive(this), true);
     this.el.addEventListener('wheel', () => (sync.leader = this), { passive: true });
-    this.el.querySelector('.pane-close').addEventListener('click', () => call('close_pane', { pane: this.id }));
+    this.el.querySelector('.pane-close').addEventListener('click', () => this.requestClose());
     this.el.querySelector('.pane-popout').addEventListener('click', () => call('pop_out_pane', { pane: this.id }));
+    this.el.querySelector('.pane-edit-btn').addEventListener('click', () => this.toggleEdit());
+    this.el.querySelector('.pane-conflict-keep').addEventListener('click', () => this.resolveConflict('keep'));
+    this.el.querySelector('.pane-conflict-reload').addEventListener('click', () => this.resolveConflict('reload'));
     this.scroller.addEventListener('scroll', () => onPaneScroll(this), { passive: true });
   }
 
-  // mode: 'first' 처음 열 때, 'changed' 파일이 바뀌었을 때(같은 내용이면 건너뜀), 'force' 메뉴의 다시 읽기
+  setMode(mode) {
+    this.mode = mode;
+    this.el.dataset.mode = mode;
+  }
+
+  isEditing() {
+    return !!this.editor;
+  }
+
+  setDirty(d) {
+    if (this.dirty === d) return;
+    this.dirty = d;
+    this.el.classList.toggle('dirty', d);
+    call('mark_dirty', { pane: this.id, dirty: d });
+  }
+
+  requestClose() {
+    if (this.dirty) {
+      const yes = window.confirm(`"${this.el.querySelector('.pane-name').textContent}" 에 저장 안 된 변경이 있습니다. 그대로 닫을까요?`);
+      if (!yes) return;
+    }
+    call('close_pane', { pane: this.id });
+  }
+
+  // mode: 'first' 처음 열 때, 'changed' 파일이 바뀌었을 때(같은 내용이면 건너뜀),
+  //       'force' 메뉴의 다시 읽기, 'external' 편집 중 외부 변경을 사용자가 수용
   async load(mode) {
-    const doc = await invoke('load_document', { pane: this.id, reload: mode !== 'first', force: mode === 'force' });
+    // 편집 중이고 dirty 이고 외부에서 바뀌었으면 자동 로드 금지 — 충돌 바를 띄우고 사용자에게 맡긴다
+    if (mode === 'changed' && this.isEditing() && this.dirty) {
+      const peek = await invoke('load_document', { pane: this.id, reload: true, force: true });
+      if (peek && peek.text !== this.source) {
+        this.pendingExternal = peek;
+        this.conflict.classList.add('show');
+      }
+      return;
+    }
+    const doc = await invoke('load_document', { pane: this.id, reload: mode !== 'first', force: mode === 'force' || mode === 'external' });
     if (!doc) return;
     this.el.querySelector('.pane-name').textContent = doc.title;
     this.el.querySelector('.pane-dir').textContent = doc.dir;
     this.head.title = this.path = doc.path;
+    this.source = doc.text;
+    this.fileText = doc.text;
+    this.setDirty(false);
+    this.conflict.classList.remove('show');
+    this.pendingExternal = null;
+    if (this.editor) this.editor.applyExternalSource(doc.text);
     await this.render(doc.text, { docURL: doc.docUrl, anchor: doc.anchor, preserveScroll: mode !== 'first' });
     // 자체 점검 중에는 다시 읽을 때마다 보고해서, 파일을 고치면 결과가 바뀌는지로 자동 새로고침도 확인한다
     if (selfTest === 'report' && ready && mode !== 'first') await report(mode);
@@ -170,6 +234,113 @@ class Pane {
     clearTimeout(this.reloadTimer);
     // 저장 한 번에 감시 이벤트가 여러 개 오므로 잠깐 모았다가 읽는다. 저장 도중이라 못 읽으면 다음 이벤트를 기다린다.
     this.reloadTimer = setTimeout(() => this.load(force ? 'force' : 'changed').catch(() => {}), force ? 0 : 120);
+  }
+
+  resolveConflict(choice) {
+    this.conflict.classList.remove('show');
+    const external = this.pendingExternal;
+    this.pendingExternal = null;
+    if (!external) return;
+    if (choice === 'reload') {
+      // 편집 내용 버리고 디스크 내용으로
+      this.source = external.text;
+      this.fileText = external.text;
+      this.setDirty(false);
+      if (this.editor) this.editor.applyExternalSource(external.text);
+      this.render(external.text, { docURL: external.docUrl, preserveScroll: true });
+    }
+    // 'keep' 은 아무 일 안 함 (내 편집 그대로)
+  }
+
+  // Toggle UX: 보기 ↔ 편집. Pane UX 에서는 처음부터 edit 모드로 열리므로 끌 일이 거의 없다.
+  async toggleEdit() {
+    if (this.editor) {
+      await this.exitEdit();
+    } else {
+      await this.enterEdit();
+    }
+  }
+
+  async enterEdit() {
+    if (this.editor) return;
+    if (!this.fileText && this.source) this.fileText = this.source;
+    const initial = this.source;
+    this.setMode('edit');
+    this.el.classList.add('editing');
+    this.editor = createEditor(this.editHost, initial, {
+      onChange: (text) => {
+        this.source = text;
+        this.setDirty(text !== this.fileText);
+      },
+      onPreview: (text) => {
+        this.render(text, { docURL: this.docURL, preserveScroll: true });
+        // 편집 → 보기 칸 공유 (같은 창의 보기 칸)
+        syncViewPanes(this, text);
+      },
+      onCursorLine: (line) => sync.fromEditor(this, line, 'cursor'),
+      onScrollLine: (line) => sync.fromEditor(this, line, 'scroll'),
+      onError: (e) => logError(e),
+    });
+    // CodeMirror 안에서도 ⌘S / ⌘⇧S 로 저장하게. 메뉴 단축키는 CodeMirror 포커스에서 가로채질 수 있다.
+    this.editor.cm.setOption('extraKeys', Object.assign({}, this.editor.cm.getOption('extraKeys'), {
+      'Cmd-S': () => this.save(),
+      'Ctrl-S': () => this.save(),
+      'Shift-Cmd-S': () => this.saveAs(),
+      'Shift-Ctrl-S': () => this.saveAs(),
+      'Cmd-E': () => this.exitEdit(),
+      'Ctrl-E': () => this.exitEdit(),
+    }));
+    this.editor.focus();
+  }
+
+  async exitEdit() {
+    if (!this.editor) return;
+    if (this.dirty) {
+      const yes = window.confirm('저장 안 된 변경이 있습니다. 편집 모드를 나가면서 디스크로 되돌릴까요?');
+      if (!yes) {
+        this.editor.focus();
+        return;
+      }
+      // 되돌리기
+      this.source = this.fileText;
+      this.setDirty(false);
+      await this.render(this.fileText, { docURL: this.docURL, preserveScroll: true });
+    }
+    this.editor.destroy();
+    this.editor = null;
+    this.setMode('view');
+    this.el.classList.remove('editing');
+    this.conflict.classList.remove('show');
+  }
+
+  async save() {
+    if (!this.editor) return; // 편집기가 없으면 저장할 소스도 없다
+    const text = this.editor.getSource();
+    try {
+      await invoke('save_document', { pane: this.id, path: null, text });
+      this.fileText = text;
+      this.source = text;
+      this.setDirty(false);
+    } catch (e) {
+      logError(e);
+      window.alert('저장 실패: ' + (e.message || e));
+    }
+  }
+
+  async saveAs() {
+    if (!this.editor) return;
+    const text = this.editor.getSource();
+    try {
+      const res = await invoke('save_document_as', { pane: this.id, text });
+      if (res) {
+        this.fileText = text;
+        this.source = text;
+        this.setDirty(false);
+      }
+    } catch (e) {
+      logError(e);
+      window.alert('저장 실패: ' + (e.message || e));
+    }
   }
 
   fail(e) {
@@ -329,12 +500,21 @@ function setActive(pane) {
   call('set_active_pane', { pane: pane.id });
 }
 
-function addPane(id, index) {
-  const pane = new Pane(id);
+function addPane(id, index, mode) {
+  const pane = new Pane(id, mode || 'view');
   panes.set(id, pane);
   content.insertBefore(pane.el, content.children[index] || null);
   layoutChanged();
   return pane;
+}
+
+// 같은 파일 경로의 '보기 칸' 들에 편집기의 현재 소스로 다시 그린다 (Pane UX: 편집 ↔ 보기 라이브 공유).
+function syncViewPanes(editPane, text) {
+  if (!editPane.path) return;
+  for (const p of panes.values()) {
+    if (p === editPane || p.isEditing() || p.path !== editPane.path) continue;
+    p.render(text, { docURL: p.docURL, preserveScroll: true }).catch((e) => logError(e));
+  }
 }
 
 function removePane(id) {
@@ -486,7 +666,36 @@ const sync = {
     const pos = this.position(p);
     for (const q of panes.values()) if (q !== p) this.apply(q, pos);
   },
+
+  // 편집기(소스 줄 기준)가 리더. 같은 파일 경로의 보기 칸 들을 data-sl 로 찾아 그 블록으로 스크롤한다.
+  fromEditor(editPane, line, kind) {
+    if (!editPane.path) return;
+    for (const q of panes.values()) {
+      if (q === editPane || q.isEditing() || q.path !== editPane.path) continue;
+      const el = findBlockBySourceLine(q.write, line);
+      if (!el) continue;
+      const scroller = q.scroller;
+      const top = scroller.getBoundingClientRect().top;
+      const y = el.getBoundingClientRect().top - top + scroller.scrollTop;
+      scroller.scrollTop = Math.max(0, y - (kind === 'cursor' ? scroller.clientHeight * 0.3 : 0));
+    }
+  },
 };
+
+// 프리뷰 DOM 에서 소스 줄 번호(data-sl) 로 블록을 찾는다. 정확한 줄이 없으면 그 바로 아래의 가장 가까운 블록.
+function findBlockBySourceLine(root, line) {
+  const nodes = root.querySelectorAll('[data-sl]');
+  let best = null;
+  let bestSl = -1;
+  for (const n of nodes) {
+    const sl = parseInt(n.dataset.sl, 10);
+    if (Number.isFinite(sl) && sl <= line && sl > bestSl) {
+      best = n;
+      bestSl = sl;
+    }
+  }
+  return best;
+}
 
 function headingKey(heads, i) {
   const text = heads[i].textContent.trim();
@@ -720,9 +929,11 @@ window.MDV = {
   changed: (id) => panes.get(id)?.reload(false),
   reload: (force) => panes.forEach((p) => p.reload(force)),
   goto: (id, anchor) => panes.get(id)?.scrollToAnchor(anchor),
-  addPane: (id, index) => {
-    const pane = addPane(id, index);
-    pane.load('first').catch((e) => pane.fail(e));
+  addPane: (id, index, mode) => {
+    const pane = addPane(id, index, mode);
+    pane.load('first').then(() => {
+      if (mode === 'edit') pane.enterEdit();
+    }).catch((e) => pane.fail(e));
   },
   replacePane: (oldId, newId) => {
     const old = panes.get(oldId);
@@ -735,12 +946,28 @@ window.MDV = {
     const pane = panes.get(id);
     if (!pane) return;
     setActive(pane);
-    pane.scroller.focus({ preventScroll: true });
+    if (pane.editor) pane.editor.focus();
+    else pane.scroller.focus({ preventScroll: true });
   },
   setSync: (on) => (sync.on = !!on),
   toggleOutline: () => setOutline(!document.body.classList.contains('outline-open')),
   find: { open: () => find.open(), next: () => find.step(1), prev: () => find.step(-1), close: () => find.close() },
   drag,
+
+  // ── 편집 ────────────────────────────────────────────────────────
+  save: () => active && active.editor && active.save(),
+  saveAs: () => active && active.editor && active.saveAs(),
+  toggleEdit: () => active && active.toggleEdit(),
+  openEditPane: () => {
+    if (!active || !active.path) return;
+    call('add_edit_pane', { path: active.path });
+  },
+  setEditUiMode: (mode) => {
+    editUiMode = mode === 'pane' ? 'pane' : 'toggle';
+    document.body.dataset.editUiMode = editUiMode;
+  },
+  // '모든 칸에 저장 안 된 변경이 없는가' — 창 닫기 전 확인에 쓴다 (껍데기 측이 미리 묻는다면)
+  isAnyDirty: () => [...panes.values()].some((p) => p.dirty),
 };
 
 // 글자를 골랐을 때만 웹뷰 기본 메뉴(복사 등). 빈 곳 우클릭의 '새로 고침·뒤로' 같은 항목은 감춘다.
@@ -752,6 +979,7 @@ document.addEventListener('contextmenu', (e) => {
   const layout = await invoke('get_layout');
   selfTest = layout.selfTest && (layout.scenario ? 'scenario' : 'report');
   sync.on = layout.sync;
+  MDV.setEditUiMode(layout.editUiMode || 'toggle');
   setOutline(layout.outline, false);
   layout.panes.forEach((id, i) => addPane(id, i));
   setActive(panes.get(layout.active) || ordered()[0]);
@@ -759,5 +987,15 @@ document.addEventListener('contextmenu', (e) => {
   ready = true;
   active?.scroller.focus({ preventScroll: true });
   if (selfTest === 'scenario') await report('scenario', { scenario: await scenario() });
-  else if (selfTest) await report('first');
+  else if (selfTest) {
+    let roundtrip = null;
+    if (layout.roundtrip) {
+      try {
+        roundtrip = await invoke('roundtrip_check_cmd', { path: layout.roundtrip });
+      } catch (e) {
+        roundtrip = { ok: false, error: String(e) };
+      }
+    }
+    await report('first', roundtrip ? { roundtrip } : {});
+  }
 })().catch(logError);
